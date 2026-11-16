@@ -1,5 +1,9 @@
 # RepoVerify / GitArena
 
+[![RepoVerify / GitArena CI](https://github.com/origguard/Gitarena/actions/workflows/ci.yml/badge.svg)](https://github.com/origguard/Gitarena/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![Node.js >= 22](https://img.shields.io/badge/Node.js-%3E%3D22.0.0-00ff88.svg)](https://nodejs.org/)
+
 **Moteur d'Inspection Chirurgicale, Due-Diligence Open-Source, Arène ELO & Serveur MCP pour dépôts GitHub.**
 
 > **100 % Node.js ESM natif** • **Zéro dépendance NPM externe** • **SQLite WAL + FTS5 sub-milliseconde** • **Audit Supply-Chain OSV.dev & CI/CD en direct**
