@@ -1,0 +1,22 @@
+# Base de données SQLite locale (reconstruite via `npm run seed`)
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Variables d'environnement et secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Dépendances & caches éventuels
+node_modules/
+__pycache__/
+*.pyc
+.arena/
+
+# Journaux et fichiers OS
+*.log
+.DS_Store
+Thumbs.db

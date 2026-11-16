@@ -1,0 +1,28 @@
+{
+  "name": "gitarena",
+  "version": "1.0.0",
+  "description": "GitArena: The Live Battleground and Hyperscale Discovery Engine for 1,000,000 GitHub Repositories",
+  "type": "module",
+  "main": "src/server/server.mjs",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node src/server/server.mjs",
+    "seed": "node src/db/seeder.mjs",
+    "ingest": "node src/db/bulk-ingestor.mjs",
+    "verify": "node src/engines/sandbox-runner.mjs",
+    "mcp": "node src/mcp/mcp-server.mjs",
+    "test": "node tests/test-gitarena-e2e.mjs"
+  },
+  "keywords": [
+    "gitarena",
+    "github",
+    "ai-arena",
+    "harness",
+    "sqlite-fts5",
+    "sovereign"
+  ],
+  "author": "OrigGuard / Antigravity",
+  "license": "Apache-2.0"
+}
