@@ -210,15 +210,18 @@ const CONTROLS = [
       return conflation ? 'DÉCORATIF' : 'PROBANT';
     } },
 
-  { id: 'C-12', inv: 'journal Merkle', defect: 'preuve d\'inclusion tolérant une feuille altérée',
+  { id: 'C-12', inv: 'journal Merkle', defect: 'vérificateur qui accepte toute preuve',
     run: () => {
       if (!merkleBuild || !merkleProof || !merkleVerify) return 'NON_INSTRUMENTÉ';
-      const leaves = [{ r: 'a', v: 'ALLOW' }, { r: 'b', v: 'DENY' }, { r: 'c', v: 'INDETERMINATE' }];
-      const { levels, root } = merkleBuild(leaves);
-      const proof = merkleProof(levels, 1);
-      const clean = merkleVerify(leaves[1], proof, root).valid === true;
-      const tamperedValid = merkleVerify({ r: 'b', v: 'ALLOW' }, proof, root).valid === true;
-      return verdict(clean, tamperedValid);
+      const probe = vp => {
+        const leaves = [{ i: 0, v: 'a' }, { i: 1, v: 'b' }, { i: 2, v: 'c' }];
+        const t = merkleBuild(leaves);
+        const proof = merkleProof(t.levels, 1);
+        const tampered = { ...leaves[1], v: 'b-ALTERÉ' };
+        return vp(tampered, proof, t.root).valid === false;
+      };
+      const mutant = () => ({ valid: true });
+      return verdict(probe(merkleVerify), probe(mutant));
     } },
 ];
 
