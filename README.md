@@ -8,8 +8,7 @@
 
 > **100 % Node.js ESM natif** • **Zéro dépendance NPM externe** • **SQLite WAL + FTS5 sub-milliseconde** • **Audit Supply-Chain OSV.dev & CI/CD en direct**
 
-<!-- ASTUCE GITHUB : Pour activer le lecteur vidéo HTML5 intégré directement sur GitHub.com, ouvrez ce README en mode Edit sur github.com et glissez-déposez `videos/05-tournoi-6-frameworks-ia.mp4` juste en dessous. -->
-[![Regarder la démo Tournoi Survival (6 Frameworks IA)](assets/video-preview-tournament.svg)](videos/05-tournoi-6-frameworks-ia.mp4)
+![RepoVerify / GitArena — Démo Tournoi Survival](assets/repoverify-showcase.gif)
 
 ---
 

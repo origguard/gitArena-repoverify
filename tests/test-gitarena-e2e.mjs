@@ -397,7 +397,8 @@ async function runE2eHarness() {
     'src/server/server.mjs',
     'src/mcp/mcp-server.mjs',
     'src/studio/video-studio.mjs',
-    'src/studio/benchmark-publisher.mjs'
+    'src/studio/benchmark-publisher.mjs',
+    'src/studio/gif-encoder.mjs'
   ];
 
   for (const file of filesToCheck) {
