@@ -13,6 +13,7 @@
     "ingest": "node src/db/bulk-ingestor.mjs",
     "verify": "node src/engines/sandbox-runner.mjs",
     "video": "node src/studio/video-studio.mjs",
+    "tournament-video": "node src/studio/video-studio.mjs --tournament",
     "mcp": "node src/mcp/mcp-server.mjs",
     "test": "node tests/test-gitarena-e2e.mjs"
   },

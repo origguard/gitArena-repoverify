@@ -138,3 +138,26 @@ CREATE TABLE IF NOT EXISTS workflow_audit_log (
     payload_json TEXT,
     executed_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- 9. Cache Santé Mainteneurs & Bus Factor (expiration 12h)
+CREATE TABLE IF NOT EXISTS maintainer_health_cache (
+    full_name TEXT PRIMARY KEY,
+    contributors_count INTEGER NOT NULL DEFAULT 0,
+    top_contributor_share REAL NOT NULL DEFAULT 100,
+    latest_release_tag TEXT,
+    latest_release_at TEXT,
+    bus_factor_risk TEXT NOT NULL DEFAULT 'MODERATE',
+    raw_json TEXT,
+    cached_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 10. Historique des Tournois Multi-Dépôts (4 à 8 candidats)
+CREATE TABLE IF NOT EXISTS arena_tournaments (
+    id TEXT PRIMARY KEY,
+    profile TEXT NOT NULL,
+    category TEXT,
+    repos_json TEXT NOT NULL,
+    stages_json TEXT NOT NULL,
+    winner_full_name TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

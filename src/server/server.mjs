@@ -24,10 +24,13 @@ export function createGitArenaServer() {
   router.get('/api/badge/:owner/:name', controllers.getBadge);
   router.get('/api/pixelrag/tile/:owner/:name', controllers.getPixelRagTile);
 
-  // Arène dialectique & classement ELO
+  // Arène dialectique, classement ELO & Tournois multi-dépôts (4 à 8 repos)
   router.get('/api/arena/duel', controllers.getArenaDuelController);
   router.post('/api/arena/vote', controllers.postArenaVoteController);
   router.get('/api/arena/history', controllers.getArenaHistoryController);
+  router.get('/api/arena/tournament', controllers.arenaTournamentController);
+  router.post('/api/arena/tournament', controllers.arenaTournamentController);
+  router.get('/api/arena/tournament/:id/export', controllers.exportTournamentController);
 
   // Radar tactique God's Eye & Workflows autonomes
   router.get('/api/radar', controllers.getRadarController);

@@ -1,10 +1,12 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, statSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { initDatabase, closeDatabase } from '../db/database.mjs';
 import { inspectRepository, inspectCodeIntelligence } from '../engines/repo-service.mjs';
+import { runMultiRepoTournament } from '../engines/tournament-engine.mjs';
 
 /**
  * Sovereign Video Duel Studio — RepoVerify / GitArena
@@ -582,25 +584,8 @@ Repo: https://github.com/origguard/gitArena-repoverify
 `;
 }
 
-export async function generateDuelVideo(slugA, slugB, options = {}) {
-  const browserPath = findHeadlessBrowser();
-  if (!browserPath) {
-    throw new Error('Aucun navigateur Chromium (Chrome/Edge) détecté pour le rendu vidéo.');
-  }
-
-  mkdirSync(VIDEOS_DIR, { recursive: true });
-  const repoA = await prepareFighterData(slugA);
-  const repoB = await prepareFighterData(slugB);
-  const meta = chooseWinnerAndCopy(repoA, repoB, options.hook);
-
-  const duelData = { repoA, repoB, ...meta };
-  const fileBase = options.outputName || `${repoA.name.toLowerCase()}-vs-${repoB.name.toLowerCase()}`.replace(/[^a-z0-9_-]/g, '-');
-  const outMp4 = join(VIDEOS_DIR, `${fileBase}.mp4`);
-  const outPost = join(VIDEOS_DIR, `${fileBase}-post.md`);
-
-  const html = buildStudioHtml(duelData, 22);
-
-  await new Promise((resolve, reject) => {
+async function renderHtmlToMp4(browserPath, html, outMp4, timeoutMs = 55000) {
+  return new Promise((resolve, reject) => {
     let browserProc = null;
     let settled = false;
 
@@ -619,7 +604,7 @@ export async function generateDuelVideo(slugA, slugB, options = {}) {
           res.end(JSON.stringify({ ok: true, bytes: buf.length }));
           settled = true;
           if (browserProc) browserProc.kill();
-          srv.close(() => resolve());
+          srv.close(() => resolve(buf.length));
         });
         return;
       }
@@ -631,9 +616,9 @@ export async function generateDuelVideo(slugA, slugB, options = {}) {
       if (!settled) {
         if (browserProc) browserProc.kill();
         srv.close();
-        reject(new Error(`Timeout rendu vidéo pour ${fileBase}`));
+        reject(new Error(`Timeout rendu vidéo pour ${outMp4}`));
       }
-    }, 45000);
+    }, timeoutMs);
 
     srv.listen(0, '127.0.0.1', () => {
       const port = srv.address().port;
@@ -650,11 +635,473 @@ export async function generateDuelVideo(slugA, slugB, options = {}) {
         clearTimeout(timeout);
         if (!settled) {
           srv.close();
-          reject(new Error(`Navigateur fermé avant l'export MP4 de ${fileBase}`));
+          reject(new Error(`Navigateur fermé avant l'export MP4 de ${outMp4}`));
         }
       });
     });
   });
+}
+
+async function renderHtmlToCarouselPdf(browserPath, html, outPdf) {
+  const tempHtml = join(tmpdir(), `repoverify-carousel-${Date.now()}.html`);
+  writeFileSync(tempHtml, html, 'utf8');
+  return new Promise((resolve, reject) => {
+    const proc = spawn(browserPath, [
+      '--headless=new',
+      '--disable-gpu',
+      '--no-pdf-header-footer',
+      `--print-to-pdf=${outPdf}`,
+      `file://${tempHtml.replace(/\\/g, '/')}`
+    ], { stdio: 'ignore' });
+
+    proc.on('error', (err) => {
+      try { rmSync(tempHtml, { force: true }); } catch { /* ignore */ }
+      reject(err);
+    });
+    proc.on('close', (code) => {
+      try { rmSync(tempHtml, { force: true }); } catch { /* ignore */ }
+      if (code === 0 && existsSync(outPdf)) {
+        resolve(statSync(outPdf).size);
+      } else {
+        reject(new Error(`Échec génération Carrousel PDF (code ${code})`));
+      }
+    });
+  });
+}
+
+function buildTournamentVideoHtml(tournament, hookHeadline, durationSec = 26) {
+  const safeJson = JSON.stringify({
+    hookHeadline,
+    profileLabel: tournament.profileMeta?.label || tournament.profile,
+    category: tournament.category,
+    candidates: tournament.ranking,
+    podium: tournament.podium,
+    champion: tournament.champion
+  }).replace(/</g, '\\u003c');
+
+  return `<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="UTF-8"><title>Tournament Renderer</title></head>
+<body style="margin:0;background:#090a0d;overflow:hidden;">
+<canvas id="stage" width="1080" height="1920"></canvas>
+<script>
+const T = ${safeJson};
+const DURATION_MS = ${durationSec * 1000};
+const FPS = 30;
+const canvas = document.getElementById('stage');
+const ctx = canvas.getContext('2d');
+
+function easeOut(x) { return 1 - Math.pow(1 - Math.min(1, Math.max(0, x)), 3); }
+function rr(x, y, w, h, r, fill, stroke, lw = 2) {
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+}
+function wrap(text, x, y, mw, lh, col, font, align = 'center') {
+  ctx.fillStyle = col; ctx.font = font; ctx.textAlign = align;
+  const words = String(text || '').split(' ');
+  let line = '', cy = y;
+  for (let i = 0; i < words.length; i++) {
+    const test = line + words[i] + ' ';
+    if (ctx.measureText(test).width > mw && i > 0) {
+      ctx.fillText(line.trim(), x, cy); line = words[i] + ' '; cy += lh;
+    } else line = test;
+  }
+  if (line.trim()) ctx.fillText(line.trim(), x, cy);
+}
+
+function drawBg(t) {
+  const g = ctx.createLinearGradient(0, 0, 0, 1920);
+  g.addColorStop(0, '#07090e'); g.addColorStop(0.5, '#0d1320'); g.addColorStop(1, '#07090d');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, 1080, 1920);
+  ctx.strokeStyle = 'rgba(0,243,255,0.045)'; ctx.lineWidth = 1;
+  for (let x = 0; x < 1080; x += 90) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,1920); ctx.stroke(); }
+  for (let y = (t*20)%90; y < 1920; y += 90) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(1080,y); ctx.stroke(); }
+  rr(280, 74, 520, 56, 28, 'rgba(0,255,136,0.1)', 'rgba(0,255,136,0.45)', 2);
+  ctx.fillStyle = '#00ff88'; ctx.font = 'bold 25px "Segoe UI", Arial'; ctx.textAlign = 'center';
+  ctx.fillText('🏆 REPOVERIFY • TOURNOI SURVIVAL', 540, 111);
+  ctx.fillStyle = '#181c27'; ctx.fillRect(0, 0, 1080, 10);
+  ctx.fillStyle = '#00f3ff'; ctx.fillRect(0, 0, 1080 * Math.min(1, t / (DURATION_MS/1000)), 10);
+}
+
+function drawCandidateRow(c, idx, y, mode) {
+  const isElim1 = c.eliminatedAtStage === 1;
+  const isElim2 = c.eliminatedAtStage === 2;
+  let border = '#252b3d', bg = '#111622', badgeText = '★ ' + c.stars.toLocaleString('en-US'), badgeCol = '#00f3ff';
+
+  if (mode === 'FILTER1') {
+    if (isElim1) { border = '#ff3366'; bg = 'rgba(255,51,102,0.12)'; badgeText = '✗ ' + c.license + ' (ÉLIMINÉ)'; badgeCol = '#ff3366'; }
+    else { border = '#00ff88'; bg = 'rgba(0,255,136,0.07)'; badgeText = '✓ ' + c.license; badgeCol = '#00ff88'; }
+  } else if (mode === 'FILTER2') {
+    if (isElim1 || isElim2) {
+      border = '#ff3366'; bg = 'rgba(255,51,102,0.10)';
+      badgeText = isElim1 ? '✗ HORS-JEU (LICENCE)' : '✗ ÉLIMINÉ (' + c.ciStatus + ')';
+      badgeCol = '#ff3366';
+    } else {
+      border = '#00f3ff'; bg = 'rgba(0,243,255,0.07)';
+      badgeText = 'BUS: ' + c.busFactorRisk + ' • CI: ' + c.ciStatus;
+      badgeCol = '#00ff88';
+    }
+  }
+
+  rr(66, y, 948, 128, 18, bg, border, 2.5);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = (mode !== 'START' && (isElim1 || (mode === 'FILTER2' && isElim2))) ? '#94a3b8' : '#ffffff';
+  ctx.font = 'bold 32px "Segoe UI", Arial';
+  ctx.fillText((idx + 1) + '. ' + c.name, 96, y + 56);
+  ctx.fillStyle = '#8b97ab'; ctx.font = '22px Consolas, monospace';
+  ctx.fillText(c.owner + ' • ' + c.language, 96, y + 96);
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = badgeCol; ctx.font = 'bold 26px Consolas, monospace';
+  ctx.fillText(badgeText, 984, y + 74);
+}
+
+function renderFrame(t) {
+  drawBg(t);
+  const list = T.candidates.slice(0, 8);
+
+  if (t < 4.5) {
+    wrap(T.hookHeadline, 540, 225, 950, 66, '#ffffff', '900 54px "Segoe UI", Arial');
+    ctx.fillStyle = '#00f3ff'; ctx.font = 'bold 26px Consolas, monospace'; ctx.textAlign = 'center';
+    ctx.fillText(list.length + ' CANDIDATS • ' + T.profileLabel.toUpperCase(), 540, 385);
+    list.forEach((c, i) => drawCandidateRow(c, i, 440 + i * 148, 'START'));
+  } else if (t < 10.0) {
+    ctx.textAlign = 'center'; ctx.fillStyle = '#00ff88'; ctx.font = 'bold 34px Consolas, monospace';
+    ctx.fillText('FILTRE 1 / 3 : LICENCE COMMERCIALE', 540, 215);
+    ctx.fillStyle = '#94a3b8'; ctx.font = '26px "Segoe UI", Arial';
+    ctx.fillText('Élimination directe des licences copyleft (GPL / AGPL)', 540, 265);
+    list.forEach((c, i) => drawCandidateRow(c, i, 330 + i * 150, 'FILTER1'));
+  } else if (t < 15.5) {
+    ctx.textAlign = 'center'; ctx.fillStyle = '#00f3ff'; ctx.font = 'bold 34px Consolas, monospace';
+    ctx.fillText('FILTRE 2 / 3 : CI/CD, BUS FACTOR & ACTIVITÉ', 540, 215);
+    ctx.fillStyle = '#94a3b8'; ctx.font = '26px "Segoe UI", Arial';
+    ctx.fillText('Vérification des workflows GitHub Actions & mono-mainteneurs', 540, 265);
+    list.forEach((c, i) => drawCandidateRow(c, i, 330 + i * 150, 'FILTER2'));
+  } else if (t < 21.5) {
+    ctx.textAlign = 'center'; ctx.fillStyle = '#f59e0b'; ctx.font = 'bold 38px Consolas, monospace';
+    ctx.fillText('🏆 PODIUM FINAL (SURVIVANTS)', 540, 230);
+    ctx.fillStyle = '#94a3b8'; ctx.font = '26px "Segoe UI", Arial';
+    ctx.fillText(T.profileLabel, 540, 285);
+    const p = easeOut((t - 15.5) / 1.4);
+    const medals = ['🥇 #1', '🥈 #2', '🥉 #3'];
+    const colors = ['#00ff88', '#00f3ff', '#f59e0b'];
+    (T.podium || []).slice(0, 3).forEach((c, idx) => {
+      const y = 360 + idx * 380;
+      rr(74, y, 932, 320, 24, '#111622', colors[idx], idx === 0 ? 4 : 2.5);
+      ctx.textAlign = 'left'; ctx.fillStyle = colors[idx]; ctx.font = 'bold 30px Consolas, monospace';
+      ctx.fillText(medals[idx] + '  ' + c.fullName, 110, y + 72);
+      ctx.fillStyle = '#cbd5e1'; ctx.font = '26px Consolas, monospace';
+      ctx.fillText('Licence: ' + c.license + '  •  Bus Factor: ' + c.busFactorRisk + '  •  CI: ' + c.ciStatus, 110, y + 132);
+      rr(110, y + 180, 860, 44, 12, '#181c27', '#252b3d', 1.5);
+      rr(110, y + 180, 860 * Math.min(1, c.profileScore / 100) * p, 44, 12, colors[idx], null);
+      ctx.textAlign = 'right'; ctx.fillStyle = '#ffffff'; ctx.font = 'bold 34px Consolas, monospace';
+      ctx.fillText((Math.round(c.profileScore * p * 10)/10) + ' / 100', 970, y + 275);
+    });
+  } else {
+    ctx.textAlign = 'center'; ctx.fillStyle = '#00ff88'; ctx.font = 'bold 34px Consolas, monospace';
+    ctx.fillText('AUDITEZ VOTRE SHORTLIST EN 48H', 540, 320);
+    rr(74, 410, 932, 470, 28, '#111622', '#00f3ff', 3);
+    ctx.fillStyle = '#ffffff'; ctx.font = '900 52px "Segoe UI", Arial';
+    ctx.fillText('RepoVerify / GitArena', 540, 520);
+    wrap('Tournois multi-dépôts, Bus Factor, CI/CD GitHub Actions, CVE OSV.dev & Serveur MCP.', 540, 610, 820, 48, '#cbd5e1', '600 32px "Segoe UI", Arial');
+    ctx.fillStyle = '#00ff88'; ctx.font = 'bold 30px Consolas, monospace';
+    ctx.fillText('github.com/origguard/gitArena-repoverify', 540, 810);
+
+    rr(74, 960, 932, 420, 28, 'rgba(245,158,11,0.09)', '#f59e0b', 3);
+    ctx.fillStyle = '#f59e0b'; ctx.font = 'bold 30px Consolas, monospace';
+    ctx.fillText('🎁 LEAD MAGNET GRATUIT EN DM', 540, 1055);
+    wrap('Envoyez vos 3 à 5 dépôts candidats en DM : recevez gratuitement leur matrice comparative (Licences, CVE & CI) !', 540, 1145, 820, 48, '#ffffff', 'bold 34px "Segoe UI", Arial');
+  }
+
+  rr(64, 1745, 952, 115, 20, '#0f172a', 'rgba(0,243,255,0.35)', 2);
+  ctx.textAlign = 'center'; ctx.fillStyle = '#00f3ff'; ctx.font = 'bold 26px Consolas, monospace';
+  ctx.fillText('github.com/origguard/gitArena-repoverify', 540, 1792);
+  ctx.fillStyle = '#e2e8f0'; ctx.font = '600 24px "Segoe UI", Arial';
+  ctx.fillText('Audit Open-Source & Due-Diligence B2B • Lien en bio', 540, 1835);
+}
+
+function setupAudio() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const ac = new AudioCtx();
+    const dest = ac.createMediaStreamDestination();
+    const g = ac.createGain(); g.gain.value = 0.13; g.connect(dest);
+    const tone = (f, s, d, type='triangle', v=0.22) => {
+      const o = ac.createOscillator(), og = ac.createGain();
+      o.type = type; o.frequency.setValueAtTime(f, ac.currentTime + s);
+      og.gain.setValueAtTime(0.0001, ac.currentTime + s);
+      og.gain.exponentialRampToValueAtTime(v, ac.currentTime + s + 0.03);
+      og.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + s + d);
+      o.connect(og); og.connect(g); o.start(ac.currentTime + s); o.stop(ac.currentTime + s + d + 0.02);
+    };
+    for (let s = 0; s < ${durationSec}; s += 0.5) tone(s % 2 === 0 ? 110 : 82.4, s, 0.22, 'triangle', 0.18);
+    [0, 4.5, 10.0, 15.5, 21.5].forEach((cue, i) => tone(440 + i * 95, cue, 0.35, 'sine', 0.35));
+    return { ac, track: dest.stream.getAudioTracks()[0] };
+  } catch { return null; }
+}
+
+(async () => {
+  renderFrame(0);
+  const stream = canvas.captureStream(FPS);
+  const audio = setupAudio();
+  if (audio?.track) stream.addTrack(audio.track);
+  const mime = MediaRecorder.isTypeSupported('video/mp4;codecs=avc1.42E01E,mp4a.40.2')
+    ? 'video/mp4;codecs=avc1.42E01E,mp4a.40.2'
+    : (MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' : 'video/webm');
+  const chunks = [];
+  const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 4500000 });
+  rec.ondataavailable = e => { if (e.data?.size > 0) chunks.push(e.data); };
+  rec.onstop = async () => {
+    const blob = new Blob(chunks, { type: mime });
+    await fetch('/upload', { method: 'POST', body: blob });
+    if (audio?.ac) audio.ac.close().catch(() => {});
+  };
+  rec.start(250);
+  const t0 = performance.now();
+  const iv = setInterval(() => {
+    const el = performance.now() - t0;
+    renderFrame(Math.min(DURATION_MS/1000, el/1000));
+    if (el >= DURATION_MS) { clearInterval(iv); rec.stop(); }
+  }, 1000 / FPS);
+})();
+</script></body></html>`;
+}
+
+function buildCarouselHtml(tournament, hookHeadline) {
+  const esc = (s) => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const list = tournament.ranking.slice(0, 8);
+  const eliminated = list.filter(c => c.eliminatedAtStage);
+
+  const slideStyle = `
+    width: 1080px; height: 1350px; padding: 72px; box-sizing: border-box;
+    background: linear-gradient(180deg, #07090e 0%, #0d1320 100%);
+    color: #f0f3f8; font-family: 'Segoe UI', Arial, sans-serif;
+    display: flex; flex-direction: column; justify-content: space-between;
+    page-break-after: always; position: relative; border: 1px solid #1e293b;
+  `;
+
+  return `<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<style>
+  @page { size: 1080px 1350px; margin: 0; }
+  body { margin: 0; padding: 0; background: #07090e; }
+  .pill { display:inline-block; padding:10px 22px; border-radius:999px; background:rgba(0,255,136,0.1); border:1.5px solid #00ff88; color:#00ff88; font-family:Consolas,monospace; font-weight:700; font-size:20px; }
+  .card { background:#111622; border:2px solid #252b3d; border-radius:18px; padding:24px 28px; margin-bottom:18px; }
+  table { width:100%; border-collapse:collapse; font-size:22px; }
+  th { text-align:left; color:#8b97ab; font-family:Consolas,monospace; font-size:18px; padding:14px 10px; border-bottom:2px solid #252b3d; }
+  td { padding:16px 10px; border-bottom:1px solid #1e2332; }
+  .footer { display:flex; justify-content:space-between; font-family:Consolas,monospace; font-size:20px; color:#64748b; border-top:1px solid #1e293b; padding-top:20px; }
+</style>
+</head>
+<body>
+  <!-- SLIDE 1 : COUVERTURE -->
+  <div style="${slideStyle}">
+    <div>
+      <span class="pill">REPOVERIFY • DUE DILIGENCE</span>
+      <h1 style="font-size:66px; line-height:1.15; margin:48px 0 24px 0; color:#fff;">${esc(hookHeadline)}</h1>
+      <p style="font-size:32px; color:#94a3b8; line-height:1.45;">
+        Nous avons passé <strong style="color:#00f3ff;">${list.length} dépôts GitHub</strong> au crible selon le profil <strong style="color:#00ff88;">${esc(tournament.profileMeta?.label || tournament.profile)}</strong> : Licences BigCode, CI/CD GitHub Actions, Bus Factor &amp; CVE.
+      </p>
+    </div>
+    <div>
+      <div class="card" style="border-color:#00f3ff;">
+        <div style="font-size:22px; color:#00f3ff; font-family:Consolas,monospace; margin-bottom:12px;">CANDIDATS ÉVALUÉS :</div>
+        <div style="font-size:26px; font-weight:700; line-height:1.6;">
+          ${list.map(c => esc(c.fullName)).join(' &nbsp;•&nbsp; ')}
+        </div>
+      </div>
+    </div>
+    <div class="footer"><span>SWIPE ➔ POUR LE VERDICT</span><span>1 / 5</span></div>
+  </div>
+
+  <!-- SLIDE 2 : MATRICE COMPARATIVE -->
+  <div style="${slideStyle}">
+    <div>
+      <span class="pill">MATRICE TECHNIQUE &amp; RISQUES</span>
+      <h2 style="font-size:44px; margin:28px 0;">Comparatif des ${list.length} Dépôts</h2>
+      <table>
+        <thead>
+          <tr><th>#</th><th>Dépôt</th><th>Score</th><th>Licence</th><th>CI</th><th>Bus Factor</th></tr>
+        </thead>
+        <tbody>
+          ${list.map((c, i) => `
+            <tr>
+              <td style="font-family:Consolas,monospace;font-weight:700;">#${i + 1}</td>
+              <td><strong>${esc(c.name)}</strong><br><span style="font-size:17px;color:#8b97ab;">${esc(c.owner)} • ★${c.stars.toLocaleString('en-US')}</span></td>
+              <td style="color:#00f3ff;font-weight:800;font-family:Consolas,monospace;">${c.profileScore}</td>
+              <td style="color:${c.commercialSafe ? '#00ff88' : '#ff3366'};font-family:Consolas,monospace;">${esc(c.license)}</td>
+              <td>${esc(c.ciStatus)}</td>
+              <td style="color:${c.busFactorRisk === 'LOW' ? '#00ff88' : (c.busFactorRisk === 'HIGH' ? '#ff3366' : '#f59e0b')};font-weight:700;">${esc(c.busFactorRisk)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div class="footer"><span>github.com/origguard/gitArena-repoverify</span><span>2 / 5</span></div>
+  </div>
+
+  <!-- SLIDE 3 : LES PIÈGES DÉTECTÉS -->
+  <div style="${slideStyle}">
+    <div>
+      <span class="pill" style="border-color:#ff3366;color:#ff3366;background:rgba(255,51,102,0.1);">FILTRES ÉLIMINATOIRES</span>
+      <h2 style="font-size:46px; margin:32px 0;">Pourquoi certains échouent en prod ?</h2>
+      ${eliminated.length > 0 ? eliminated.map(c => `
+        <div class="card" style="border-color:#ff3366;">
+          <div style="font-size:30px; font-weight:800; color:#ff3366;">✗ ${esc(c.fullName)}</div>
+          <div style="font-size:24px; color:#e2e8f0; margin-top:8px;">Éliminé à l'étape ${c.eliminatedAtStage} : ${esc(c.eliminationReason)}</div>
+        </div>
+      `).join('') : `
+        <div class="card" style="border-color:#00ff88;">
+          <div style="font-size:30px; font-weight:800; color:#00ff88;">✓ Tous les candidats ont franchi les portes Licence &amp; CI</div>
+          <div style="font-size:24px; color:#cbd5e1; margin-top:10px;">Le départage final s'est joué sur le Score Profil, le Bus Factor et l'ELO Arène.</div>
+        </div>
+      `}
+    </div>
+    <div class="footer"><span>AUDIT AUTOMATISÉ REPOVERIFY</span><span>3 / 5</span></div>
+  </div>
+
+  <!-- SLIDE 4 : PODIUM FINAL -->
+  <div style="${slideStyle}">
+    <div>
+      <span class="pill">🏆 PODIUM FINAL</span>
+      <h2 style="font-size:48px; margin:28px 0;">Top 3 Recommandé (${esc(tournament.profileMeta?.label || tournament.profile)})</h2>
+      ${(tournament.podium || []).map((c, idx) => `
+        <div class="card" style="border-color:${idx === 0 ? '#00ff88' : (idx === 1 ? '#00f3ff' : '#f59e0b')}; padding:32px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <span style="font-size:36px; font-weight:900;">#${idx + 1} ${esc(c.fullName)}</span>
+            <span style="font-size:38px; font-weight:900; color:#00ff88; font-family:Consolas,monospace;">${c.profileScore}/100</span>
+          </div>
+          <div style="font-size:24px; color:#cbd5e1; margin-top:12px;">
+            Licence ${esc(c.license)} • ★ ${c.stars.toLocaleString('en-US')} • Bus Factor : ${esc(c.busFactorRisk)} • CI : ${esc(c.ciStatus)}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+    <div class="footer"><span>Sceau SHA-256 : ${esc((tournament.seal || '').slice(0, 16))}...</span><span>4 / 5</span></div>
+  </div>
+
+  <!-- SLIDE 5 : LEAD MAGNET & OFFRE B2B -->
+  <div style="${slideStyle}">
+    <div>
+      <span class="pill" style="border-color:#f59e0b;color:#f59e0b;background:rgba(245,158,11,0.1);">🎁 AUDIT GRATUIT SHORTLIST</span>
+      <h2 style="font-size:56px; line-height:1.15; margin:40px 0;">Vous hésitez entre 3 à 5 librairies ?</h2>
+      <div class="card" style="border-color:#00f3ff; padding:36px;">
+        <p style="font-size:30px; line-height:1.5; margin:0;">
+          Envoyez vos dépôts candidats en <strong>DM</strong> : je vous génère gratuitement votre matrice comparative (Licences Commerciales, CVE OSV.dev, Bus Factor &amp; CI/CD).
+        </p>
+      </div>
+      <div class="card" style="border-color:#00ff88; padding:36px;">
+        <div style="font-size:26px; color:#00ff88; font-weight:800; margin-bottom:10px;">BESOIN D'UN AUDIT COMPLET EN 48H ?</div>
+        <p style="font-size:26px; color:#cbd5e1; margin:0;">
+          Due-diligence pré-levée de fonds, mise en conformité licences &amp; setup Serveur MCP souverain pour vos équipes.
+        </p>
+      </div>
+    </div>
+    <div class="footer"><span>github.com/origguard/gitArena-repoverify</span><span>5 / 5</span></div>
+  </div>
+</body>
+</html>`;
+}
+
+function buildTournamentSocialPosts(tournament) {
+  const top3 = (tournament.podium || []).map((c, i) => `${i + 1}. **${c.fullName}** (${c.profileScore}/100 • \`${c.license}\` • Bus Factor: ${c.busFactorRisk})`).join('\n');
+  const eliminated = tournament.ranking.filter(c => c.eliminatedAtStage);
+
+  return `# Pack Publication Tournoi — ${tournament.category} (${tournament.candidatesCount} dépôts)
+
+## LinkedIn (FR — avec Carrousel PDF + Vidéo Survival)
+🏆 **Tournoi Survival : ${tournament.candidatesCount} dépôts GitHub passés au scanner RepoVerify** (Profil : *${tournament.profileMeta?.label || tournament.profile}*)
+
+Au lieu de choisir une stack au nombre d'étoiles, nous avons soumis ${tournament.candidatesCount} projets à 3 filtres éliminatoires :
+1️⃣ Licence commerciale (BigCode The Stack v2)
+2️⃣ Santé CI/CD GitHub Actions & Bus Factor (mono-mainteneur)
+3️⃣ Supply-Chain CVE (OSV.dev) & Maturité
+
+${eliminated.length > 0 ? `⚠️ **Éliminations notables :**\n${eliminated.map(e => `- \`${e.fullName}\` : ${e.eliminationReason}`).join('\n')}\n` : ''}
+🥇 **Podium Final :**
+${top3}
+
+🎁 **Offre gratuite (Lead Magnet) :** Vous hésitez entre **3 à 5 dépôts** pour votre prochain sprint ? Envoyez-les-moi en DM et je vous renvoie leur matrice comparative complète gratuitement.
+
+🛠️ Outil 100 % open-source (Apache-2.0) : https://github.com/origguard/gitArena-repoverify
+#OpenSource #CTO #DevSecOps #DueDiligence #IA #GitHub
+
+---
+
+## X / Twitter (EN)
+🏆 **${tournament.candidatesCount}-Repo Survival Tournament** (${tournament.category})
+
+Audited on License compliance, GitHub Actions CI, Bus Factor & OSV.dev CVEs:
+${(tournament.podium || []).map((c, i) => `#${i + 1} ${c.fullName} — ${c.profileScore}/100 (${c.license})`).join('\n')}
+
+Open-source engine: https://github.com/origguard/gitArena-repoverify
+#OpenSource #AI #DevTools #SupplyChain
+`;
+}
+
+export async function generateTournamentMedia(options = {}) {
+  const browserPath = findHeadlessBrowser();
+  if (!browserPath) {
+    throw new Error('Aucun navigateur Chromium (Chrome/Edge) détecté.');
+  }
+  mkdirSync(VIDEOS_DIR, { recursive: true });
+
+  const tournament = await runMultiRepoTournament({
+    repos: options.repos || [],
+    category: options.category || '',
+    profile: options.profile || 'enterprise',
+    limit: options.limit || 6,
+    includeLiveChecks: options.includeLiveChecks !== false
+  });
+
+  const fileBase = options.outputName || `tournament-${tournament.profile}-${tournament.tournamentId.slice(0, 6)}`;
+  const hookHeadline = options.hook || `TOURNOI ${tournament.candidatesCount} DÉPÔTS : QUI SURVIT EN PROD ?`;
+
+  const outMp4 = join(VIDEOS_DIR, `${fileBase}.mp4`);
+  const outPdf = join(VIDEOS_DIR, `${fileBase}-carousel.pdf`);
+  const outPost = join(VIDEOS_DIR, `${fileBase}-post.md`);
+
+  const videoHtml = buildTournamentVideoHtml(tournament, hookHeadline, 26);
+  await renderHtmlToMp4(browserPath, videoHtml, outMp4, 65000);
+
+  const carouselHtml = buildCarouselHtml(tournament, hookHeadline);
+  const pdfBytes = await renderHtmlToCarouselPdf(browserPath, carouselHtml, outPdf);
+
+  writeFileSync(outPost, buildTournamentSocialPosts(tournament), 'utf8');
+
+  return {
+    tournamentId: tournament.tournamentId,
+    champion: tournament.champion?.fullName,
+    candidatesCount: tournament.candidatesCount,
+    videoPath: outMp4,
+    videoSizeKb: Math.round(statSync(outMp4).size / 1024),
+    carouselPdfPath: outPdf,
+    carouselPdfSizeKb: Math.round(pdfBytes / 1024),
+    postPath: outPost
+  };
+}
+
+export async function generateDuelVideo(slugA, slugB, options = {}) {
+  const browserPath = findHeadlessBrowser();
+  if (!browserPath) {
+    throw new Error('Aucun navigateur Chromium (Chrome/Edge) détecté pour le rendu vidéo.');
+  }
+
+  mkdirSync(VIDEOS_DIR, { recursive: true });
+  const repoA = await prepareFighterData(slugA);
+  const repoB = await prepareFighterData(slugB);
+  const meta = chooseWinnerAndCopy(repoA, repoB, options.hook);
+
+  const duelData = { repoA, repoB, ...meta };
+  const fileBase = options.outputName || `${repoA.name.toLowerCase()}-vs-${repoB.name.toLowerCase()}`.replace(/[^a-z0-9_-]/g, '-');
+  const outMp4 = join(VIDEOS_DIR, `${fileBase}.mp4`);
+  const outPost = join(VIDEOS_DIR, `${fileBase}-post.md`);
+
+  const html = buildStudioHtml(duelData, 22);
+  await renderHtmlToMp4(browserPath, html, outMp4, 45000);
 
   writeFileSync(outPost, buildSocialPosts(duelData), 'utf8');
   const sizeKb = Math.round(statSync(outMp4).size / 1024);
@@ -669,9 +1116,15 @@ export async function generateDuelVideo(slugA, slugB, options = {}) {
   };
 }
 
-// Exécution CLI : node src/studio/video-studio.mjs [ownerA/repoA ownerB/repoB]
+// Exécution CLI :
+//   node src/studio/video-studio.mjs ownerA/repoA ownerB/repoB
+//   node src/studio/video-studio.mjs --tournament [--profile enterprise] [--repos a/b,c/d,...] [--category "..."]
 if (process.argv[1] && process.argv[1].endsWith('video-studio.mjs')) {
   const args = process.argv.slice(2);
+  const getArg = (flag, def = '') => {
+    const idx = args.indexOf(flag);
+    return idx !== -1 && args[idx + 1] ? args[idx + 1] : def;
+  };
   initDatabase();
 
   const defaultDuels = [
@@ -702,7 +1155,26 @@ if (process.argv[1] && process.argv[1].endsWith('video-studio.mjs')) {
   ];
 
   try {
-    if (args.length >= 2) {
+    if (args.includes('--tournament')) {
+      const reposArg = getArg('--repos', '');
+      const repos = reposArg ? reposArg.split(',').map(s => s.trim()).filter(Boolean) : [
+        'langchain-ai/langgraph',
+        'crewAIInc/crewAI',
+        'microsoft/autogen',
+        'unclecode/crawl4ai',
+        'mendableai/firecrawl',
+        'All-Hands-AI/OpenHands'
+      ];
+      const res = await generateTournamentMedia({
+        repos,
+        category: getArg('--category', 'Tournoi Agents & Scraping IA'),
+        profile: getArg('--profile', 'enterprise'),
+        limit: parseInt(getArg('--limit', '6'), 10),
+        hook: getArg('--hook', '6 FRAMEWORKS IA : QUI SURVIT EN PROD ?'),
+        outputName: getArg('--out', '05-tournoi-6-frameworks-ia')
+      });
+      console.log('[VIDEO-STUDIO TOURNAMENT] ✓', JSON.stringify(res, null, 2));
+    } else if (args.length >= 2) {
       const res = await generateDuelVideo(args[0], args[1]);
       console.log('[VIDEO-STUDIO] ✓ Généré :', JSON.stringify(res, null, 2));
     } else {

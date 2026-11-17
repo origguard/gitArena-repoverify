@@ -6,6 +6,11 @@ import {
   isValidRepoSlug
 } from '../engines/sandbox-runner.mjs';
 import {
+  runMultiRepoTournament,
+  getTournamentById,
+  buildTournamentMarkdown
+} from '../engines/tournament-engine.mjs';
+import {
   PERMISSIVE_LICENSES,
   inspectRepository,
   inspectCodeIntelligence,
@@ -180,6 +185,45 @@ export async function postArenaVoteController(req, res) {
 export function getArenaHistoryController(req, res) {
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 10));
   return sendJson(res, 200, { duels: getRecentDuels(limit) });
+}
+
+export async function arenaTournamentController(req, res) {
+  const rawRepos = req.method === 'POST' ? req.body?.repos : req.query.repos;
+  const repos = Array.isArray(rawRepos)
+    ? rawRepos
+    : (typeof rawRepos === 'string' && rawRepos.trim()
+        ? rawRepos.split(',').map(s => s.trim()).filter(Boolean)
+        : []);
+
+  const category = (req.method === 'POST' ? req.body?.category : req.query.category) || '';
+  const profile = (req.method === 'POST' ? req.body?.profile : req.query.profile) || 'enterprise';
+  const limit = (req.method === 'POST' ? req.body?.limit : req.query.limit) || 6;
+  const includeLiveRaw = req.method === 'POST' ? req.body?.includeLiveChecks : req.query.includeLiveChecks;
+  const includeLiveChecks = includeLiveRaw === false || includeLiveRaw === 'false' ? false : true;
+
+  const result = await runMultiRepoTournament({ repos, category, profile, limit, includeLiveChecks });
+  return sendJson(res, 200, result);
+}
+
+export function exportTournamentController(req, res) {
+  const t = getTournamentById(req.params.id);
+  if (!t) {
+    return sendJson(res, 404, { error: 'Tournoi introuvable' });
+  }
+  const format = (req.query.format || 'md').toLowerCase();
+  if (format === 'json') {
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="tournament-${t.tournamentId.slice(0, 8)}.json"`
+    });
+    return res.end(JSON.stringify(t, null, 2));
+  }
+  const md = buildTournamentMarkdown(t);
+  res.writeHead(200, {
+    'Content-Type': 'text/markdown; charset=utf-8',
+    'Content-Disposition': `attachment; filename="tournament-${t.tournamentId.slice(0, 8)}.md"`
+  });
+  return res.end(md);
 }
 
 export function getRadarController(req, res) {

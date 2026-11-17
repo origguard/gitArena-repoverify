@@ -6,6 +6,7 @@ import {
   inspectCodeIntelligence,
   getArenaDuel
 } from '../engines/repo-service.mjs';
+import { runMultiRepoTournament } from '../engines/tournament-engine.mjs';
 
 /**
  * Serveur MCP Souverain (Model Context Protocol) sur stdio (JSON-RPC 2.0)
@@ -66,6 +67,19 @@ const TOOLS = [
       properties: {
         repoA: { type: 'string', description: 'Premier dépôt (owner/name)' },
         repoB: { type: 'string', description: 'Second dépôt (owner/name)' }
+      }
+    }
+  },
+  {
+    name: 'run_tournament',
+    description: 'Exécute un tournoi Survival multi-dépôts (4 à 8 candidats) avec élimination par étapes et pondération selon le profil métier (enterprise, startup, ai_training, balanced).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repos: { type: 'array', items: { type: 'string' }, description: 'Liste de 4 à 8 dépôts owner/name (optionnel si category fournie)' },
+        category: { type: 'string', description: 'Catégorie technologique à évaluer si repos non fournis' },
+        profile: { type: 'string', enum: ['enterprise', 'startup', 'ai_training', 'balanced'], description: 'Profil de pondération métier (défaut: enterprise)' },
+        limit: { type: 'number', description: 'Nombre de candidats (4 à 8, défaut 6)' }
       }
     }
   }
@@ -172,6 +186,14 @@ export async function handleMcpRequest(msg) {
           });
         }
         resultObj = duel;
+      } else if (toolName === 'run_tournament') {
+        resultObj = await runMultiRepoTournament({
+          repos: Array.isArray(args.repos) ? args.repos : [],
+          category: args.category || '',
+          profile: args.profile || 'enterprise',
+          limit: args.limit || 6,
+          includeLiveChecks: args.includeLiveChecks !== false
+        });
       } else {
         return writeError(id, -32601, `Outil MCP inconnu : ${toolName}`);
       }

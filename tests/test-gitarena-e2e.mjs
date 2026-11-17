@@ -13,6 +13,8 @@ import { generateRadarTelemetry } from '../src/engines/gods-eye-radar.mjs';
 import { analyzeDigest, computeAiContextFit } from '../src/engines/gitingest-engine.mjs';
 import { mapManagerToEcosystem } from '../src/engines/osv-scanner.mjs';
 import { isValidRepoSlug, probeSandboxCapabilities, buildSandboxExecutionPlan } from '../src/engines/sandbox-runner.mjs';
+import { classifyBusFactorRisk } from '../src/engines/maintainer-telemetry.mjs';
+import { computeProfileScore, buildTournamentMarkdown } from '../src/engines/tournament-engine.mjs';
 import { createGitArenaServer } from '../src/server/server.mjs';
 import { SovereignAutomationEngine } from '../src/workflows/workflow-engine.mjs';
 
@@ -26,7 +28,7 @@ async function runE2eHarness() {
   console.log('======================================================\n');
 
   let passedTests = 0;
-  const totalTests = 13;
+  const totalTests = 14;
 
   // TEST-01 : Schéma & Persistance SQLite WAL
   console.log('[TEST-01] Vérification du Schéma & Mode WAL SQLite...');
@@ -37,11 +39,12 @@ async function runE2eHarness() {
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(t => t.name);
   for (const requiredTable of [
     'repositories', 'repositories_fts', 'arena_duels', 'harness_runs',
-    'gitingest_cache', 'ci_telemetry_cache', 'osv_vuln_cache', 'workflow_audit_log'
+    'gitingest_cache', 'ci_telemetry_cache', 'osv_vuln_cache', 'workflow_audit_log',
+    'maintainer_health_cache', 'arena_tournaments'
   ]) {
     assert.ok(tables.includes(requiredTable), `Table ${requiredTable} absente`);
   }
-  console.log('  ✓ TEST-01 Validé : SQLite WAL et 8 tables opérationnels.');
+  console.log('  ✓ TEST-01 Validé : SQLite WAL et 10 tables opérationnels.');
   passedTests++;
 
   // TEST-02 : Ingestion & Seeding Réel
@@ -212,7 +215,37 @@ async function runE2eHarness() {
     const resTraversal = await fetch(`http://127.0.0.1:${testPort}/..%2f..%2fpackage.json`);
     assert.equal(resTraversal.status, 403, 'Path Traversal doit retourner 403 Forbidden');
 
-    console.log('  ✓ TEST-09 Validé : Tous les endpoints REST et protections Path Traversal validés.');
+    // Tournoi Multi-Dépôts (6 candidats) + Export Markdown Shortlist
+    const resTourney = await fetch(`http://127.0.0.1:${testPort}/api/arena/tournament`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        profile: 'enterprise',
+        includeLiveChecks: false,
+        repos: [
+          'langchain-ai/langgraph',
+          'crewAIInc/crewAI',
+          'microsoft/autogen',
+          'unclecode/crawl4ai',
+          'mendableai/firecrawl',
+          'All-Hands-AI/OpenHands'
+        ]
+      })
+    });
+    assert.equal(resTourney.status, 200);
+    const tourneyData = await resTourney.json();
+    assert.equal(tourneyData.candidatesCount, 6);
+    assert.equal(tourneyData.stages.length, 3);
+    assert.ok(tourneyData.champion && tourneyData.podium.length === 3);
+    // Vérifier que mendableai/firecrawl (AGPL-3.0) est éliminé à l'étape 1 en profil enterprise
+    const firecrawlRow = tourneyData.ranking.find(c => c.fullName === 'mendableai/firecrawl');
+    assert.equal(firecrawlRow.eliminatedAtStage, 1, 'AGPL-3.0 doit être éliminé à l\'étape 1 en profil enterprise');
+
+    const resTourneyExport = await fetch(`http://127.0.0.1:${testPort}/api/arena/tournament/${tourneyData.tournamentId}/export?format=md`);
+    assert.equal(resTourneyExport.status, 200);
+    assert.ok((await resTourneyExport.text()).includes('Matrice Comparative Multi-Dépôts'));
+
+    console.log('  ✓ TEST-09 Validé : Endpoints REST, Tournoi Multi-Dépôts & Path Traversal validés.');
     passedTests++;
   } finally {
     server.closeAllConnections?.();
@@ -247,7 +280,7 @@ async function runE2eHarness() {
       try {
         assert.equal(code, 0, 'MCP server doit quitter proprement avec code 0');
         assert.equal(responses[0].result.serverInfo.name, 'repoverify-gitarena');
-        assert.equal(responses[1].result.tools.length, 4);
+        assert.equal(responses[1].result.tools.length, 5);
         const searchPayload = JSON.parse(responses[2].result.content[0].text);
         assert.ok(searchPayload.items.length > 0, 'search_repos MCP doit retourner des résultats');
         resolve();
@@ -326,8 +359,22 @@ async function runE2eHarness() {
   console.log(`  ✓ TEST-12 Validé : Sandbox guardrails OK (git=${hostCaps.gitAvailable}, docker=${hostCaps.dockerAvailable}).`);
   passedTests++;
 
-  // TEST-13 : Scanner Anti-Simulation (Zero Mock / Zero TODO)
-  console.log('[TEST-13] Exécution du Scanner Anti-Simulation...');
+  // TEST-13 : Bus Factor & Profils de Scoring Métier
+  console.log('[TEST-13] Vérification Bus Factor & Profils Pondérés...');
+  assert.equal(classifyBusFactorRisk(1, 100), 'HIGH');
+  assert.equal(classifyBusFactorRisk(2, 90), 'HIGH');
+  assert.equal(classifyBusFactorRisk(10, 35), 'LOW');
+
+  const safeCandidate = { aiScore: 85, elo: 1650, commercialSafe: true, daysSincePush: 5, ciStatus: 'SUCCESS', cveCount: 0, cveMaxSeverity: 'NONE', busFactorRisk: 'LOW', hasLockfile: true, hasDocsDir: true, estimatedTokens: 120000 };
+  const riskyCandidate = { aiScore: 88, elo: 1660, commercialSafe: false, daysSincePush: 5, ciStatus: 'FAILURE', cveCount: 2, cveMaxSeverity: 'CRITICAL', busFactorRisk: 'HIGH', hasLockfile: false, hasDocsDir: true, estimatedTokens: 120000 };
+  const entSafe = computeProfileScore(safeCandidate, 'enterprise').profileScore;
+  const entRisky = computeProfileScore(riskyCandidate, 'enterprise').profileScore;
+  assert.ok(entSafe > entRisky + 30, `Profil entreprise doit fortement préférer le projet sûr (${entSafe} vs ${entRisky})`);
+  console.log(`  ✓ TEST-13 Validé : Bus Factor & Profils métier conformes (Safe=${entSafe}, Risky=${entRisky}).`);
+  passedTests++;
+
+  // TEST-14 : Scanner Anti-Simulation (Zero Mock / Zero TODO)
+  console.log('[TEST-14] Exécution du Scanner Anti-Simulation...');
   const filesToCheck = [
     'src/db/database.mjs',
     'src/db/seeder.mjs',
@@ -340,13 +387,16 @@ async function runE2eHarness() {
     'src/engines/gitingest-engine.mjs',
     'src/engines/osv-scanner.mjs',
     'src/engines/ci-telemetry.mjs',
+    'src/engines/maintainer-telemetry.mjs',
     'src/engines/sandbox-runner.mjs',
+    'src/engines/tournament-engine.mjs',
     'src/engines/repo-service.mjs',
     'src/workflows/workflow-engine.mjs',
     'src/server/router.mjs',
     'src/server/controllers.mjs',
     'src/server/server.mjs',
-    'src/mcp/mcp-server.mjs'
+    'src/mcp/mcp-server.mjs',
+    'src/studio/video-studio.mjs'
   ];
 
   for (const file of filesToCheck) {
@@ -358,7 +408,7 @@ async function runE2eHarness() {
     assert.ok(!code.includes('sandbox-demo'), `Marqueur interdit sandbox-demo trouvé dans ${file}`);
     assert.ok(!code.includes('Math.random()'), `Aléatoire non déterministe Math.random() interdit dans ${file}`);
   }
-  console.log(`  ✓ TEST-13 Validé : Zéro TODO, zéro simulation, zéro Math.random() sur ${filesToCheck.length} modules.`);
+  console.log(`  ✓ TEST-14 Validé : Zéro TODO, zéro simulation, zéro Math.random() sur ${filesToCheck.length} modules.`);
   passedTests++;
 
   console.log('\n======================================================');

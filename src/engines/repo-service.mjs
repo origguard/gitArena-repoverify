@@ -6,6 +6,7 @@ import { calculateAiScore } from './ai-scoring-engine.mjs';
 import { calculateEloUpdate } from './elo-engine.mjs';
 import { deepInspect } from './gitingest-engine.mjs';
 import { fetchCiTelemetry, buildGithubHeaders } from './ci-telemetry.mjs';
+import { fetchMaintainerHealth } from './maintainer-telemetry.mjs';
 import { scanDependenciesVulnerabilities } from './osv-scanner.mjs';
 import { generateRadarTelemetry } from './gods-eye-radar.mjs';
 import { SovereignAutomationEngine } from '../workflows/workflow-engine.mjs';
@@ -217,10 +218,16 @@ export async function inspectRepository(owner, name, options = {}) {
     };
   }
 
-  // Télémétrie CI/CD réelle (GitHub Actions) + cache GitIngest local si déjà présent
-  const ciTelemetry = includeLiveCi
-    ? await fetchCiTelemetry(repo.owner, repo.name)
-    : { available: false, source: 'Mode hors-ligne / rapide', recentRuns: [] };
+  // Télémétrie CI/CD réelle + Santé Mainteneurs (Bus Factor) en parallèle
+  const [ciTelemetry, maintainerHealth] = includeLiveCi
+    ? await Promise.all([
+        fetchCiTelemetry(repo.owner, repo.name),
+        fetchMaintainerHealth(repo.owner, repo.name)
+      ])
+    : [
+        { available: false, source: 'Mode hors-ligne / rapide', recentRuns: [] },
+        { available: false, busFactorRisk: 'UNKNOWN' }
+      ];
 
   const cachedIntel = getCachedIntelSync(repo.full_name);
 
@@ -316,6 +323,7 @@ export async function inspectRepository(owner, name, options = {}) {
         daysSinceLastPush: daysSincePush,
         harnessRun: harnessResult,
         ciTelemetry,
+        maintainerHealth,
         environment: envRequirements,
         quickstart: quickstartCommands
       },
@@ -631,6 +639,9 @@ export function buildDueDiligenceMarkdown(inspectPayload, codeIntel = null) {
     `- **Taux de fiabilité** : ${health.environment.passRate}`,
     `- **Dernier commit** : il y a ${health.daysSinceLastPush} jours`,
     `- **Runtime requis** : ${health.environment.runtime}`,
+    health.maintainerHealth?.available
+      ? `- **Bus Factor** : Risque \`${health.maintainerHealth.busFactorRisk}\` (${health.maintainerHealth.contributorsSampled} contributeurs analysés, top contributeur : ${health.maintainerHealth.topContributorShare}%, dernière release : ${health.maintainerHealth.latestReleaseTag || 'Aucune'})`
+      : null,
     ``,
     `## 3. Audit Juridique & Conformité`,
     `- **Licence SPDX** : \`${legal.licenseSpdx}\``,
@@ -657,5 +668,5 @@ export function buildDueDiligenceMarkdown(inspectPayload, codeIntel = null) {
     }
   }
 
-  return lines.join('\n');
+  return lines.filter(l => l !== null).join('\n');
 }

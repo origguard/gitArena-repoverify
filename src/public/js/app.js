@@ -74,6 +74,7 @@ async function loadFiltersMeta() {
     const langSelect = document.getElementById('explorerLang');
     const catSelect = document.getElementById('explorerCategory');
     const radarCatSelect = document.getElementById('radarCategorySelect');
+    const tournamentCatSelect = document.getElementById('tournamentCategory');
 
     if (langSelect && Array.isArray(data.languages)) {
       data.languages.forEach(item => {
@@ -97,6 +98,12 @@ async function loadFiltersMeta() {
           optR.value = item.category;
           optR.textContent = `${item.category} (${item.count})`;
           radarCatSelect.appendChild(optR);
+        }
+        if (tournamentCatSelect) {
+          const optT = document.createElement('option');
+          optT.value = item.category;
+          optT.textContent = `${item.category} (${item.count})`;
+          tournamentCatSelect.appendChild(optT);
         }
       });
     }
@@ -426,6 +433,17 @@ function renderInspectionReport(data) {
               <span class="diag-key">RAM estimée :</span>
               <span class="diag-val">${health.environment.ramMinMb} Mo</span>
             </li>
+            ${health.maintainerHealth && health.maintainerHealth.available ? `
+            <li class="diag-item">
+              <span class="diag-key">Bus Factor (Mainteneurs) :</span>
+              <span class="diag-val" style="color: ${health.maintainerHealth.busFactorRisk === 'LOW' ? 'var(--accent-green)' : (health.maintainerHealth.busFactorRisk === 'HIGH' ? 'var(--accent-pink)' : 'var(--accent-amber)')};">
+                Risque ${escapeHtml(health.maintainerHealth.busFactorRisk)} (${health.maintainerHealth.contributorsSampled} contrib. • Top ${health.maintainerHealth.topContributorShare}%)
+              </span>
+            </li>
+            <li class="diag-item">
+              <span class="diag-key">Dernière Release :</span>
+              <span class="diag-val">${escapeHtml(health.maintainerHealth.latestReleaseTag || 'Aucune')} ${health.maintainerHealth.daysSinceLastRelease !== null ? `(il y a ${health.maintainerHealth.daysSinceLastRelease}j)` : ''}</span>
+            </li>` : ''}
           </ul>
           ${recentRunsHtml}
         </div>
@@ -721,7 +739,132 @@ function renderCodeIntelligence(ci) {
     </div>`;
 }
 
-/* ==================== ARÈNE & COMPARATEUR ELO ==================== */
+/* ==================== ARÈNE & COMPARATEUR ELO + TOURNOI ==================== */
+
+function switchArenaMode(mode) {
+  const duelPanel = document.getElementById('arenaDuelPanel');
+  const tourneyPanel = document.getElementById('arenaTournamentPanel');
+  const duelBtn = document.getElementById('arenaModeDuelBtn');
+  const tourneyBtn = document.getElementById('arenaModeTournamentBtn');
+
+  if (mode === 'tournament') {
+    if (duelPanel) duelPanel.style.display = 'none';
+    if (tourneyPanel) tourneyPanel.style.display = 'block';
+    duelBtn?.classList.remove('report-action-link');
+    tourneyBtn?.classList.add('report-action-link');
+  } else {
+    if (duelPanel) duelPanel.style.display = 'block';
+    if (tourneyPanel) tourneyPanel.style.display = 'none';
+    duelBtn?.classList.add('report-action-link');
+    tourneyBtn?.classList.remove('report-action-link');
+  }
+}
+
+async function runArenaTournament() {
+  const container = document.getElementById('tournamentContainer');
+  if (!container) return;
+
+  const profile = document.getElementById('tournamentProfile')?.value || 'enterprise';
+  const category = document.getElementById('tournamentCategory')?.value || '';
+  const limit = parseInt(document.getElementById('tournamentLimit')?.value || '6', 10);
+  const rawRepos = document.getElementById('tournamentReposInput')?.value.trim() || '';
+  const repos = rawRepos ? rawRepos.split(/[\s,]+/).map(s => s.trim()).filter(s => s.includes('/')) : [];
+
+  container.innerHTML = `<div class="state-loading"><p>Exécution du Tournoi Survival (${repos.length > 0 ? repos.length : limit} dépôts) en cours...</p></div>`;
+
+  try {
+    const res = await fetch('/api/arena/tournament', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile, category, limit, repos })
+    });
+    if (!res.ok) throw new Error('Erreur tournoi HTTP ' + res.status);
+    const data = await res.json();
+    renderTournamentResult(data);
+  } catch (err) {
+    container.innerHTML = `<div class="state-empty" style="color:var(--accent-pink);">Erreur tournoi : ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderTournamentResult(t) {
+  const container = document.getElementById('tournamentContainer');
+  if (!container) return;
+
+  const stagesHtml = (t.stages || []).map(st => `
+    <div class="diag-card">
+      <div class="diag-card-title"><span>🔹</span> Étape ${st.stageNumber} : ${escapeHtml(st.name)}</div>
+      <p style="font-size:0.75rem; color:var(--text-muted); margin-bottom:0.5rem;">${escapeHtml(st.rule)}</p>
+      ${st.eliminated && st.eliminated.length > 0 ? `
+        <div style="font-size:0.76rem; color:var(--accent-pink);">
+          <strong>Éliminés (${st.eliminated.length}) :</strong>
+          ${st.eliminated.map(e => `<div style="margin-top:0.2rem;">✗ ${escapeHtml(e.fullName)} — <span style="color:var(--text-muted);">${escapeHtml(e.reason)}</span></div>`).join('')}
+        </div>` : ''}
+      ${st.survivors ? `<div style="font-size:0.76rem; color:var(--accent-green); margin-top:0.4rem;">✓ ${st.survivors.length} survivant(s)</div>` : ''}
+      ${st.podium ? `
+        <div style="font-size:0.78rem; color:var(--accent-cyan); margin-top:0.35rem;">
+          ${st.podium.map(p => `<div>#${p.rank} <strong>${escapeHtml(p.fullName)}</strong> (${p.profileScore}/100)</div>`).join('')}
+        </div>` : ''}
+    </div>
+  `).join('');
+
+  container.innerHTML = `
+    <div class="report-header" style="border-color: var(--accent-green);">
+      <div class="report-title-area">
+        <div style="font-family:var(--font-mono); font-size:0.75rem; color:var(--accent-green);">
+          🏆 CHAMPION DU TOURNOI (${escapeHtml(t.profileMeta?.label || t.profile)})
+        </div>
+        <div class="report-repo-name">${escapeHtml(t.champion?.fullName || 'N/A')}</div>
+        <p style="font-size:0.84rem; color:var(--text-muted);">
+          Catégorie : ${escapeHtml(t.category)} • ${t.candidatesCount} candidats évalués • Sceau SHA-256 : ${escapeHtml((t.seal || '').substring(0, 16))}...
+        </p>
+        <div class="report-actions-bar">
+          <a href="/api/arena/tournament/${encodeURIComponent(t.tournamentId)}/export?format=md" class="report-action-btn report-action-link" download>
+            📄 Exporter Matrice Shortlist (.md)
+          </a>
+          <a href="/api/arena/tournament/${encodeURIComponent(t.tournamentId)}/export?format=json" class="report-action-btn" download>
+            🧾 Export JSON Tournoi
+          </a>
+        </div>
+      </div>
+      <div class="report-kpis">
+        <div class="kpi-item">
+          <span class="kpi-label">SCORE PROFIL</span>
+          <span class="kpi-val" style="font-size:1.35rem;">${t.champion?.profileScore ?? 0}/100</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="diagnostic-grid" style="margin-bottom:1.5rem;">
+      ${stagesHtml}
+    </div>
+
+    <div class="alternatives-section">
+      <h3 style="font-size:1.05rem; color:#fff; margin-bottom:0.5rem;">📊 Matrice Comparative Complète (${t.candidatesCount} Dépôts)</h3>
+      <table class="alt-table">
+        <thead>
+          <tr>
+            <th>RANG</th><th>DÉPÔT</th><th>SCORE PROFIL</th><th>SCORE IA</th><th>LICENCE</th><th>CI /CD</th><th>BUS FACTOR</th><th>STATUT</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${(t.ranking || []).map((c, idx) => `
+            <tr>
+              <td style="font-family:var(--font-mono); font-weight:bold;">#${idx + 1}</td>
+              <td><span class="alt-link" onclick="inspectDirect('${escapeHtml(c.fullName)}')">${escapeHtml(c.fullName)}</span></td>
+              <td style="color:var(--accent-cyan); font-weight:bold;">${c.profileScore}/100</td>
+              <td>${c.aiScore}/100</td>
+              <td style="color:${c.commercialSafe ? 'var(--accent-green)' : 'var(--accent-pink)'};">${escapeHtml(c.license)}</td>
+              <td>${escapeHtml(c.ciStatus)}</td>
+              <td>${escapeHtml(c.busFactorRisk)}</td>
+              <td style="color:${c.eliminatedAtStage ? 'var(--accent-pink)' : 'var(--accent-green)'}; font-size:0.76rem;">
+                ${c.eliminatedAtStage ? `✗ Éliminé (Ét. ${c.eliminatedAtStage})` : '✓ Survivant'}
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
 
 function compareRepoInArena(fullName) {
   document.getElementById('arenaRepoAInput').value = fullName;

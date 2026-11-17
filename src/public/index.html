@@ -105,31 +105,85 @@
       </section>
     </div>
 
-    <!-- ==================== ONGLET 2 : ARÈNE ELO ==================== -->
+    <!-- ==================== ONGLET 2 : ARÈNE ELO & TOURNOI ==================== -->
     <div id="tab-arena" class="tab-panel">
-      <div class="arena-toolbar">
-        <div>
-          <h2 style="font-size: 1.25rem; color: #fff; font-weight: 800;">⚔️ Arène Dialectique &amp; Comparateur ELO</h2>
-          <p style="font-size: 0.82rem; color: var(--text-muted);">
-            Confrontez deux dépôts concurrents sur leurs métriques techniques et arbitrez le classement ELO en temps réel (K=32).
-          </p>
+      <div style="display:flex; gap:0.5rem; margin-bottom:1rem; flex-wrap:wrap;">
+        <button id="arenaModeDuelBtn" class="report-action-btn report-action-link" onclick="switchArenaMode('duel')">
+          ⚔️ Duel 1 vs 1 (ELO)
+        </button>
+        <button id="arenaModeTournamentBtn" class="report-action-btn" onclick="switchArenaMode('tournament')">
+          🏆 Tournoi Survival (4 à 8 Dépôts)
+        </button>
+      </div>
+
+      <!-- Mode 1 : Duel 1 vs 1 -->
+      <div id="arenaDuelPanel">
+        <div class="arena-toolbar">
+          <div>
+            <h2 style="font-size: 1.25rem; color: #fff; font-weight: 800;">⚔️ Arène Dialectique &amp; Comparateur ELO</h2>
+            <p style="font-size: 0.82rem; color: var(--text-muted);">
+              Confrontez deux dépôts concurrents sur leurs métriques techniques et arbitrez le classement ELO en temps réel (K=32).
+            </p>
+          </div>
+          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+            <input type="text" id="arenaRepoAInput" class="filter-input" placeholder="Repo A (optionnel)" style="width: 170px;">
+            <input type="text" id="arenaRepoBInput" class="filter-input" placeholder="Repo B (optionnel)" style="width: 170px;">
+            <button class="report-action-btn report-action-link" onclick="loadArenaDuel(true)">
+              ⚡ Comparer / Nouveau Duel
+            </button>
+          </div>
         </div>
-        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
-          <input type="text" id="arenaRepoAInput" class="filter-input" placeholder="Repo A (optionnel)" style="width: 170px;">
-          <input type="text" id="arenaRepoBInput" class="filter-input" placeholder="Repo B (optionnel)" style="width: 170px;">
-          <button class="report-action-btn report-action-link" onclick="loadArenaDuel(true)">
-            ⚡ Comparer / Nouveau Duel
-          </button>
+
+        <div id="arenaContainer">
+          <div class="state-loading"><p>Initialisation du duel...</p></div>
+        </div>
+
+        <div class="alternatives-section" style="margin-top: 1.5rem;">
+          <h3 style="font-size: 1rem; color: #fff; margin-bottom: 0.5rem;">📜 Journal Récent des Arbitrages ELO</h3>
+          <div id="arenaHistoryContainer"></div>
         </div>
       </div>
 
-      <div id="arenaContainer">
-        <div class="state-loading"><p>Initialisation du duel...</p></div>
-      </div>
+      <!-- Mode 2 : Tournoi Multi-Dépôts (4 à 8 repos + Profils Métier) -->
+      <div id="arenaTournamentPanel" style="display:none;">
+        <div class="arena-toolbar" style="flex-direction:column; align-items:stretch;">
+          <div>
+            <h2 style="font-size: 1.25rem; color: #fff; font-weight: 800;">🏆 Tournoi Survival Multi-Dépôts (4 à 8 Candidats)</h2>
+            <p style="font-size: 0.82rem; color: var(--text-muted);">
+              Élimination par étapes (Licence Commerciale ➔ CI/CD &amp; Bus Factor ➔ Podium pondéré par Profil Métier).
+            </p>
+          </div>
+          <div class="filter-bar" style="margin:0.5rem 0 0 0;">
+            <select id="tournamentProfile" class="filter-select">
+              <option value="enterprise">🏦 Profil : Entreprise &amp; Production</option>
+              <option value="startup">⚡ Profil : Startup &amp; Vélocité MVP</option>
+              <option value="ai_training">🧠 Profil : Training LLM &amp; RAG (BigCode)</option>
+              <option value="balanced">⚖️ Profil : Équilibré</option>
+            </select>
+            <select id="tournamentCategory" class="filter-select">
+              <option value="">Catégorie auto / Élite</option>
+            </select>
+            <select id="tournamentLimit" class="filter-select">
+              <option value="4">4 dépôts</option>
+              <option value="6" selected>6 dépôts</option>
+              <option value="8">8 dépôts</option>
+            </select>
+            <input
+              type="text"
+              id="tournamentReposInput"
+              class="filter-input"
+              placeholder="Ou shortlist libre (ex: langchain-ai/langgraph, crewAIInc/crewAI, microsoft/autogen, ...)"
+              style="flex:1; min-width:260px;"
+            >
+            <button class="report-action-btn report-action-link" onclick="runArenaTournament()">
+              🏆 Lancer le Tournoi
+            </button>
+          </div>
+        </div>
 
-      <div class="alternatives-section" style="margin-top: 1.5rem;">
-        <h3 style="font-size: 1rem; color: #fff; margin-bottom: 0.5rem;">📜 Journal Récent des Arbitrages ELO</h3>
-        <div id="arenaHistoryContainer"></div>
+        <div id="tournamentContainer">
+          <div class="state-empty">Sélectionnez un profil métier et lancez le tournoi sur 4 à 8 dépôts.</div>
+        </div>
       </div>
     </div>
 
