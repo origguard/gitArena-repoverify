@@ -12,6 +12,7 @@
     "seed": "node src/db/seeder.mjs",
     "ingest": "node src/db/bulk-ingestor.mjs",
     "verify": "node src/engines/sandbox-runner.mjs",
+    "video": "node src/studio/video-studio.mjs",
     "mcp": "node src/mcp/mcp-server.mjs",
     "test": "node tests/test-gitarena-e2e.mjs"
   },
