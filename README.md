@@ -84,17 +84,33 @@ Outils MCP exposés : `search_repos`, `inspect_repo`, `get_codeintel`, `compare_
 ## Architecture du Projet
 
 ```text
+├── benchmarks/            # Rapports de tournois publics téléchargeables (Markdown, JSON, PDF)
 ├── docs/                  # Spécifications d'architecture (01-PRD à 08-VERIFICATION-HARNESS)
 ├── src/
 │   ├── db/                # Schéma SQLite WAL/FTS5, Seeder déterministe & Bulk Ingestor
-│   ├── engines/           # AI Scoring, ELO, CI Telemetry, OSV Scanner, GitIngest, PixelRAG, God's Eye, Sandbox
-│   ├── mcp/               # Serveur Model Context Protocol (stdio JSON-RPC 2.0)
-│   ├── public/            # SPA Vanilla JS/CSS (Inspecteur, Arène, Radar, Explorateur FTS5)
+│   ├── engines/           # AI Scoring, ELO, CI Telemetry, Bus Factor, OSV, GitIngest, Tournament, Sandbox
+│   ├── mcp/               # Serveur Model Context Protocol (stdio JSON-RPC 2.0 — 5 outils)
+│   ├── public/            # SPA Vanilla JS/CSS (Inspecteur, Arène & Tournoi, Radar, Explorateur FTS5)
 │   ├── server/            # Serveur HTTP souverain, routeur anti-traversal et contrôleurs REST
+│   ├── studio/            # Studio Vidéo MP4, Carrousels PDF LinkedIn & Benchmark Publisher
 │   └── workflows/         # Moteur d'automatisation TCA avec journalisation SHA-256
 ├── tests/                 # Harnais de vérification E2E complet (process.exit(0))
-└── .github/workflows/     # Pipeline CI GitHub Actions
+├── videos/                # Vidéos de duels & tournois 9:16 + carrousels prêts pour les réseaux
+└── .github/workflows/     # Pipeline CI & actualisation hebdomadaire des benchmarks
 ```
+
+---
+
+## 📊 Benchmarks & Rapports Publics Téléchargeables
+
+Consultez et téléchargez directement nos tournois multi-dépôts actualisés (**Markdown**, **JSON**, **PDF 5 slides**) dans **[benchmarks/README.md](benchmarks/README.md)** :
+
+- **[Frameworks d'Agents IA (Entreprise)](benchmarks/agents-ia-enterprise.md)** ([PDF](benchmarks/agents-ia-enterprise.pdf) • [JSON](benchmarks/agents-ia-enterprise.json))
+- **[Scraping Web & Browser Agents IA](benchmarks/scraping-web-automation.md)** ([PDF](benchmarks/scraping-web-automation.pdf) • [JSON](benchmarks/scraping-web-automation.json))
+- **[Serving & Inférence LLM Locale](benchmarks/llm-serving-inference.md)** ([PDF](benchmarks/llm-serving-inference.pdf) • [JSON](benchmarks/llm-serving-inference.json))
+- **[Bases Vectorielles & RAG (BigCode)](benchmarks/vector-databases-rag.md)** ([PDF](benchmarks/vector-databases-rag.pdf) • [JSON](benchmarks/vector-databases-rag.json))
+
+Pour régénérer tous les rapports en local : `npm run benchmarks`
 
 ---
 

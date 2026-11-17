@@ -400,5 +400,12 @@ export function buildTournamentMarkdown(t) {
     }
   }
 
+  lines.push(
+    ``,
+    `---`,
+    `> 🔍 **Généré par [RepoVerify / GitArena](https://github.com/origguard/gitArena-repoverify)** (Apache-2.0, zéro dépendance NPM).`,
+    `> 📩 *Besoin du même audit confidentiel sur vos dépôts privés ou votre shortlist avant mise en production / levée de fonds ? Ouvrez une issue ou contactez l'équipe OrigGuard pour une livraison sous 48 h.*`
+  );
+
   return lines.filter(l => l !== null).join('\n');
 }

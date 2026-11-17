@@ -642,7 +642,7 @@ async function renderHtmlToMp4(browserPath, html, outMp4, timeoutMs = 55000) {
   });
 }
 
-async function renderHtmlToCarouselPdf(browserPath, html, outPdf) {
+export async function renderHtmlToCarouselPdf(browserPath, html, outPdf) {
   const tempHtml = join(tmpdir(), `repoverify-carousel-${Date.now()}.html`);
   writeFileSync(tempHtml, html, 'utf8');
   return new Promise((resolve, reject) => {
@@ -868,7 +868,7 @@ function setupAudio() {
 </script></body></html>`;
 }
 
-function buildCarouselHtml(tournament, hookHeadline) {
+export function buildCarouselHtml(tournament, hookHeadline) {
   const esc = (s) => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   const list = tournament.ranking.slice(0, 8);
   const eliminated = list.filter(c => c.eliminatedAtStage);
