@@ -4,10 +4,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { getDb } from '../db/database.mjs';
 
 /**
- * Runtime Behavioral Firewall — Pilier 1 (RepoVerify / GitArena)
- * Détecte les vecteurs d'exfiltration (.ssh, .aws, .env), hooks postinstall dangereux,
- * exécution dynamique obfusquée et émissions réseau non autorisées avant toute exécution.
- * 100 % Natif Node.js ESM, zéro dépendance NPM.
+ * Analyse Comportementale Statique (Pre-Flight) — Pilier 1 (RepoVerify / GitArena)
+ * Détecte statiquement les vecteurs d'exfiltration (.ssh, .aws, .env), hooks postinstall,
+ * exécution dynamique obfusquée et émissions réseau explicites dans les sources.
+ * Ne constitue pas une observation runtime (eBPF/strace). 100 % Natif Node.js ESM.
  */
 
 const SCANNABLE_EXTS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.sh', '.ps1', '.rb', '.go', '.rs']);
@@ -126,7 +126,7 @@ export function summarizeBehavioralFindings(findings, scanMode = 'STATIC_PREFLIG
   }
 
   const riskScore = Math.min(100, rawRisk);
-  let verdict = 'TRUSTED_CLEAN';
+  let verdict = 'STATIC_CLEAN';
   if (hasCritical || riskScore >= 60) {
     verdict = 'BLOCK_SUSPICIOUS';
   } else if (hasHigh || riskScore >= 25) {

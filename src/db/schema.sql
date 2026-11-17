@@ -162,7 +162,7 @@ CREATE TABLE IF NOT EXISTS arena_tournaments (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- 11. Pilier 1 : Audits Comportementaux (Runtime Behavioral Firewall)
+-- 11. Pilier 1 : Audits Comportementaux Statiques (Pre-Flight)
 CREATE TABLE IF NOT EXISTS behavioral_audits (
     id TEXT PRIMARY KEY,
     full_name TEXT NOT NULL,
@@ -176,13 +176,33 @@ CREATE TABLE IF NOT EXISTS behavioral_audits (
 
 CREATE INDEX IF NOT EXISTS idx_behavior_repo ON behavioral_audits(full_name);
 
--- 12. Pilier 2 : Registre de Confiance Signé Ed25519 (Trust Registry)
-CREATE TABLE IF NOT EXISTS trust_attestations (
+-- 11b. Faits Comportementaux Séparés du Verdict (Runbook §4.4)
+CREATE TABLE IF NOT EXISTS behavioral_facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner TEXT NOT NULL,
+    name TEXT NOT NULL,
+    full_name TEXT NOT NULL,
+    commit_sha TEXT,
+    scan_mode TEXT NOT NULL CHECK (scan_mode IN ('METADATA_ONLY', 'STATIC')),
+    findings_json TEXT NOT NULL DEFAULT '[]',
+    scanned_at TEXT NOT NULL DEFAULT (datetime('now')),
+    scanner_version TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_facts_repo ON behavioral_facts(owner, name, scanned_at DESC);
+
+-- 12. Pilier 2 : Registre de Signatures d'Intégrité Ed25519
+CREATE TABLE IF NOT EXISTS integrity_signatures (
     id TEXT PRIMARY KEY,
     full_name TEXT NOT NULL,
+    subject_repo_id INTEGER,
     policy_profile TEXT NOT NULL,
     decision TEXT NOT NULL,
     trust_score INTEGER NOT NULL,
+    evidence_level INTEGER DEFAULT 1,
+    evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+    keyid TEXT,
+    expires_at TEXT,
     violations_json TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     signature_ed25519 TEXT NOT NULL,
@@ -191,7 +211,15 @@ CREATE TABLE IF NOT EXISTS trust_attestations (
     issued_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_trust_repo ON trust_attestations(full_name);
+CREATE INDEX IF NOT EXISTS idx_integrity_repo ON integrity_signatures(full_name);
+
+-- 12b. Registre de Clés Révoquées (Runbook §1.3)
+CREATE TABLE IF NOT EXISTS revoked_keys (
+    keyid TEXT PRIMARY KEY,
+    revoked_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    supersedes TEXT
+);
 
 -- 13. Pilier 3 : Benchmarks d'Exécution Chronométrés
 CREATE TABLE IF NOT EXISTS execution_benchmarks (

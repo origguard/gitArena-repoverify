@@ -1,6 +1,6 @@
 import { sign, verify } from 'node:crypto';
 import { getDb } from '../db/database.mjs';
-import { getOrInitSigningKeys } from './trust-registry.mjs';
+import { getOrInitSigningKeys } from './integrity-registry.mjs';
 
 /**
  * Plan de Contrôle Open-Core & Licences Ed25519 Hors-Ligne — Pilier 4

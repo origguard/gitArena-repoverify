@@ -42,12 +42,12 @@ export function createGitArenaServer() {
   router.get('/api/sandbox/capabilities', controllers.getSandboxCapabilitiesController);
   router.post('/api/sandbox/verify', controllers.postSandboxVerifyController);
 
-  // Trust Registry Ed25519 & Gatekeeper (Pilier 2)
-  router.get('/api/trust/pubkey', controllers.getTrustPubKeyController);
-  router.get('/api/trust/registry', controllers.getTrustRegistryController);
-  router.get('/api/trust/attest/:owner/:name', controllers.postTrustAttestController);
-  router.post('/api/trust/attest', controllers.postTrustAttestController);
-  router.post('/api/trust/verify', controllers.postTrustVerifyController);
+  // Registre de Signatures d'Intégrité Ed25519 (Pilier 2 — émission fermée 503 par défaut)
+  router.get('/api/integrity/pubkey', controllers.getIntegrityPubKeyController);
+  router.get('/api/integrity/registry', controllers.getIntegrityRegistryController);
+  router.get('/api/integrity/sign/:owner/:name', controllers.postIntegritySignController);
+  router.post('/api/integrity/sign', controllers.postIntegritySignController);
+  router.post('/api/integrity/verify', controllers.postIntegrityVerifyController);
 
   // Benchmarks d'Exécution Chronométrés (Pilier 3)
   router.get('/api/benchmarks/execution', controllers.getExecutionBenchmarksController);

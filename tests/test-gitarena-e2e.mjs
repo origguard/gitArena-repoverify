@@ -16,7 +16,18 @@ import { isValidRepoSlug, probeSandboxCapabilities, buildSandboxExecutionPlan } 
 import { classifyBusFactorRisk } from '../src/engines/maintainer-telemetry.mjs';
 import { computeProfileScore, buildTournamentMarkdown } from '../src/engines/tournament-engine.mjs';
 import { scanPackageJsonHooks, scanTextBehavior, summarizeBehavioralFindings, scanDirectoryBehavior } from '../src/engines/behavioral-firewall.mjs';
-import { verifyTrustAttestation } from '../src/engines/trust-registry.mjs';
+import {
+  getCachedBehaviorOrAnalyze,
+  issueIntegritySignature,
+  verifyIntegritySignature,
+  getHonestCensus
+} from '../src/engines/integrity-registry.mjs';
+import { Evidence, decide, isSignable, computeCanonicalFingerprint, evaluatePolicyAction } from '../src/engines/evidence.mjs';
+import { buildTree, inclusionProof, verifyProof, leafHash, nodeHash } from '../src/engines/merkle.mjs';
+import { badgeState, revokeKeyId } from '../src/engines/revocation.mjs';
+import { dedupe } from '../src/engines/corpus-audit.mjs';
+import { executionVerdict } from '../src/engines/recipes.mjs';
+import { evaluateGolden } from './golden-eval.mjs';
 import { runPrGuard } from '../src/engines/pr-guard.mjs';
 import { issueOrgLicense, verifyOrgLicense } from '../src/engines/license-tier.mjs';
 import { createGitArenaServer } from '../src/server/server.mjs';
@@ -32,7 +43,7 @@ async function runE2eHarness() {
   console.log('======================================================\n');
 
   let passedTests = 0;
-  const totalTests = 19;
+  const totalTests = 26;
 
   // TEST-01 : Schéma & Persistance SQLite WAL
   console.log('[TEST-01] Vérification du Schéma & Mode WAL SQLite...');
@@ -45,11 +56,12 @@ async function runE2eHarness() {
     'repositories', 'repositories_fts', 'arena_duels', 'harness_runs',
     'gitingest_cache', 'ci_telemetry_cache', 'osv_vuln_cache', 'workflow_audit_log',
     'maintainer_health_cache', 'arena_tournaments',
-    'behavioral_audits', 'trust_attestations', 'execution_benchmarks', 'org_policies'
+    'behavioral_audits', 'behavioral_facts', 'integrity_signatures', 'revoked_keys',
+    'execution_benchmarks', 'org_policies'
   ]) {
     assert.ok(tables.includes(requiredTable), `Table ${requiredTable} absente`);
   }
-  console.log('  ✓ TEST-01 Validé : SQLite WAL et 14 tables opérationnels.');
+  console.log('  ✓ TEST-01 Validé : SQLite WAL et 16 tables opérationnels.');
   passedTests++;
 
   // TEST-02 : Ingestion & Seeding Réel
@@ -62,7 +74,7 @@ async function runE2eHarness() {
   assert.ok(sampleRepo.ai_potential_score > 90, 'Score IA Transformers doit être > 90');
   assert.ok(db.prepare('SELECT * FROM repositories WHERE full_name = ?').get('vercel/next.js'), 'vercel/next.js doit être présent');
   assert.ok(db.prepare('SELECT * FROM repositories WHERE full_name = ?').get('ggml-org/llama.cpp'), 'ggml-org/llama.cpp doit être présent');
-  console.log(`  ✓ TEST-02 Validé : ${repoCount} dépôts certifiés en base.`);
+  console.log(`  ✓ TEST-02 Validé : ${repoCount} dépôts indexés en base.`);
   passedTests++;
 
   // TEST-03 : Recherche Plein-Texte FTS5 Sub-Milliseconde
@@ -250,39 +262,62 @@ async function runE2eHarness() {
     assert.equal(resTourneyExport.status, 200);
     assert.ok((await resTourneyExport.text()).includes('Matrice Comparative Multi-Dépôts'));
 
-    // Pilier 2 HTTP : Trust Registry Attest + Verify + Tamper Rejection
-    const resAttestOk = await fetch(`http://127.0.0.1:${testPort}/api/trust/attest`, {
+    // Pilier 2 HTTP : Extinction par défaut (503) + Integrity Registry Verify (opt-in isolé)
+    const prevExpose = process.env.REPOVERIFY_EXPOSE_VERDICTS;
+    delete process.env.REPOVERIFY_EXPOSE_VERDICTS;
+    const resClosed = await fetch(`http://127.0.0.1:${testPort}/api/integrity/sign`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo: 'huggingface/transformers', policyProfile: 'enterprise', includeLiveCi: false })
+      body: JSON.stringify({ repo: 'huggingface/transformers' })
     });
-    assert.equal(resAttestOk.status, 200);
-    const attestOk = await resAttestOk.json();
-    assert.equal(attestOk.decision, 'ALLOW');
-    assert.ok(attestOk.signatureEd25519 && attestOk.payloadSha256.length === 64);
+    assert.equal(resClosed.status, 503, 'La surface d\'émission de verdicts doit retourner 503 par défaut');
 
-    const resAttestDeny = await fetch(`http://127.0.0.1:${testPort}/api/trust/attest`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo: 'mendableai/firecrawl', policyProfile: 'enterprise', includeLiveCi: false })
-    });
-    assert.equal(resAttestDeny.status, 200);
-    const attestDeny = await resAttestDeny.json();
-    assert.equal(attestDeny.decision, 'DENY', 'AGPL-3.0 doit être DENY en politique enterprise');
+    try {
+      process.env.REPOVERIFY_EXPOSE_VERDICTS = 'true';
+      const resSignIndet = await fetch(`http://127.0.0.1:${testPort}/api/integrity/sign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo: 'huggingface/transformers', policyProfile: 'enterprise', includeLiveCi: false })
+      });
+      assert.equal(resSignIndet.status, 200);
+      const sigIndet = await resSignIndet.json();
+      assert.notEqual(sigIndet.decision, 'ALLOW', 'Sans preuves en cache, le moteur fail-closed ne doit jamais retourner ALLOW');
+      assert.ok(sigIndet.signatureEd25519 && sigIndet.payloadSha256.length === 64);
 
-    const resVerifyGood = await fetch(`http://127.0.0.1:${testPort}/api/trust/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(attestOk)
-    });
-    assert.equal((await resVerifyGood.json()).valid, true);
+      const resSignDeny = await fetch(`http://127.0.0.1:${testPort}/api/integrity/sign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo: 'mendableai/firecrawl', policyProfile: 'enterprise', includeLiveCi: false })
+      });
+      assert.equal(resSignDeny.status, 200);
+      const sigDeny = await resSignDeny.json();
+      assert.equal(sigDeny.decision, 'DENY', 'AGPL-3.0 doit être DENY en politique enterprise');
 
-    const resVerifyTampered = await fetch(`http://127.0.0.1:${testPort}/api/trust/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...attestOk, payloadJson: attestOk.payloadJson.replace('ALLOW', 'DENY') })
-    });
-    assert.equal((await resVerifyTampered.json()).valid, false, 'Une attestation altérée doit être rejetée');
+      const resVerifyGood = await fetch(`http://127.0.0.1:${testPort}/api/integrity/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sigIndet)
+      });
+      assert.equal((await resVerifyGood.json()).valid, true);
+
+      const resVerifyTampered = await fetch(`http://127.0.0.1:${testPort}/api/integrity/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...sigIndet, payloadJson: sigIndet.payloadJson.replace('INDETERMINATE', 'ALLOW') })
+      });
+      assert.equal((await resVerifyTampered.json()).valid, false, 'Une signature altérée doit être rejetée');
+
+      const dbClean = initDatabase();
+      dbClean.prepare('DELETE FROM integrity_signatures WHERE id IN (?, ?)').run(sigIndet.id, sigDeny.id);
+    } finally {
+      if (prevExpose === undefined) delete process.env.REPOVERIFY_EXPOSE_VERDICTS;
+      else process.env.REPOVERIFY_EXPOSE_VERDICTS = prevExpose;
+    }
+
+    const resStats = await fetch(`http://127.0.0.1:${testPort}/api/stats`);
+    assert.equal(resStats.status, 200);
+    const statsJson = await resStats.json();
+    assert.ok(statsJson.verifiedWithEvidenceCount <= statsJson.indexedCount, '/api/stats : vérifiés <= indexés obligatoire');
 
     // Pilier 3 HTTP : Execution Benchmarks
     const resBenchRun = await fetch(`http://127.0.0.1:${testPort}/api/benchmarks/execution/run`, {
@@ -313,7 +348,7 @@ async function runE2eHarness() {
     assert.equal(licStatus.activeTier, 'pro');
     assert.equal(licStatus.orgId, 'test-org-e2e');
 
-    console.log('  ✓ TEST-09 Validé : Endpoints REST, Trust Ed25519, Benchmarks, Open-Core & Path Traversal.');
+    console.log('  ✓ TEST-09 Validé : Endpoints REST, Extinction 503, Integrity Ed25519, Benchmarks & Path Traversal.');
     passedTests++;
   } finally {
     server.closeAllConnections?.();
@@ -322,11 +357,14 @@ async function runE2eHarness() {
     closeDatabase();
   }
 
-  // TEST-10 : Serveur MCP Souverain sur stdio (JSON-RPC 2.0)
+  // TEST-10 : Serveur MCP Souverain sur stdio (JSON-RPC 2.0 — gatekeep_install retiré par défaut)
   console.log('[TEST-10] Vérification du Serveur MCP Souverain (stdio JSON-RPC 2.0)...');
   await new Promise((resolve, reject) => {
+    const envClean = { ...process.env };
+    delete envClean.REPOVERIFY_EXPOSE_VERDICTS;
     const mcpProc = spawn(process.execPath, [join(__dirname, '../src/mcp/mcp-server.mjs')], {
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: envClean
     });
     const responses = [];
     let buffer = '';
@@ -338,7 +376,7 @@ async function runE2eHarness() {
       for (const line of lines) {
         if (line.trim()) responses.push(JSON.parse(line));
       }
-      if (responses.length >= 3) {
+      if (responses.length >= 4) {
         mcpProc.stdin.end();
       }
     });
@@ -348,9 +386,11 @@ async function runE2eHarness() {
       try {
         assert.equal(code, 0, 'MCP server doit quitter proprement avec code 0');
         assert.equal(responses[0].result.serverInfo.name, 'repoverify-gitarena');
-        assert.equal(responses[1].result.tools.length, 6);
+        assert.equal(responses[1].result.tools.length, 5, 'gatekeep_install doit être retiré de tools/list');
+        assert.equal(responses[1].result.tools.some(t => t.name === 'gatekeep_install'), false);
         const searchPayload = JSON.parse(responses[2].result.content[0].text);
         assert.ok(searchPayload.items.length > 0, 'search_repos MCP doit retourner des résultats');
+        assert.equal(responses[3].result.isError, true, 'Appel explicite à gatekeep_install doit retourner isError: true');
         resolve();
       } catch (e) {
         reject(e);
@@ -365,8 +405,14 @@ async function runE2eHarness() {
       method: 'tools/call',
       params: { name: 'search_repos', arguments: { q: 'transformers', limit: 3 } }
     }) + '\n');
+    mcpProc.stdin.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: { name: 'gatekeep_install', arguments: { repo: 'huggingface/transformers' } }
+    }) + '\n');
   });
-  console.log('  ✓ TEST-10 Validé : Serveur MCP stdio opérationnel (6 outils dont gatekeep_install).');
+  console.log('  ✓ TEST-10 Validé : Serveur MCP stdio opérationnel (5 outils, gatekeep_install fermé par défaut).');
   passedTests++;
 
   // TEST-11 : Pipeline Bulk Ingestor Hyperscale (Test 10 000 dépôts sur base WAL temporaire)
@@ -484,18 +530,20 @@ async function runE2eHarness() {
   console.log('  ✓ TEST-17 Validé : Licences Ed25519 Open-Core signées & vérifiées hors-ligne.');
   passedTests++;
 
-  // TEST-18 : Vérification Hors-Ligne Signature Ed25519 (Tamper Check unitaire)
-  console.log('[TEST-18] Vérification du Contrat de Signature Trust Registry...');
-  assert.equal(verifyTrustAttestation({ payloadJson: '{}', signatureEd25519: 'bad', publicKeyPem: 'bad' }).valid, false);
+  // TEST-18 : Vérification Hors-Ligne Signature Ed25519 (Contrat Fail-Closed)
+  console.log('[TEST-18] Vérification du Contrat de Signature d\'Intégrité...');
+  assert.equal(verifyIntegritySignature({ payloadJson: '{}', signatureEd25519: 'bad', publicKeyPem: 'bad' }).valid, false);
   console.log('  ✓ TEST-18 Validé : Contrat de vérification Ed25519 fail-closed.');
   passedTests++;
 
   // TEST-19 : Scanner Anti-Simulation (Zero Mock / Zero TODO)
   console.log('[TEST-19] Exécution du Scanner Anti-Simulation...');
   const filesToCheck = [
+    'src/config/flags.mjs',
     'src/db/database.mjs',
     'src/db/seeder.mjs',
     'src/db/bulk-ingestor.mjs',
+    'src/engines/evidence.mjs',
     'src/engines/ai-scoring-engine.mjs',
     'src/engines/elo-engine.mjs',
     'src/engines/harness-runner.mjs',
@@ -506,7 +554,11 @@ async function runE2eHarness() {
     'src/engines/ci-telemetry.mjs',
     'src/engines/maintainer-telemetry.mjs',
     'src/engines/behavioral-firewall.mjs',
-    'src/engines/trust-registry.mjs',
+    'src/engines/integrity-registry.mjs',
+    'src/engines/merkle.mjs',
+    'src/engines/revocation.mjs',
+    'src/engines/corpus-audit.mjs',
+    'src/engines/recipes.mjs',
     'src/engines/pr-guard.mjs',
     'src/engines/benchmark-runner.mjs',
     'src/engines/license-tier.mjs',
@@ -520,7 +572,8 @@ async function runE2eHarness() {
     'src/mcp/mcp-server.mjs',
     'src/studio/video-studio.mjs',
     'src/studio/benchmark-publisher.mjs',
-    'src/studio/gif-encoder.mjs'
+    'src/studio/gif-encoder.mjs',
+    'tests/golden-eval.mjs'
   ];
 
   for (const file of filesToCheck) {
@@ -533,6 +586,145 @@ async function runE2eHarness() {
     assert.ok(!code.includes('Math.random()'), `Aléatoire non déterministe Math.random() interdit dans ${file}`);
   }
   console.log(`  ✓ TEST-19 Validé : Zéro TODO, zéro simulation, zéro Math.random() sur ${filesToCheck.length} modules.`);
+  passedTests++;
+
+  // TEST-20 : I4 — Hors-cache (le test décisif : 0 ALLOW sur dépôts non analysés)
+  console.log('[TEST-20] Vérification I4 — Hors-cache (0 ALLOW sur dépôts jamais analysés)...');
+  const dbInv = initDatabase();
+  const unscannedSample = dbInv.prepare(`
+    SELECT r.owner, r.name FROM repositories r
+    LEFT JOIN behavioral_facts b ON b.owner = r.owner AND b.name = r.name
+    WHERE b.id IS NULL
+    LIMIT 100
+  `).all();
+  assert.ok(unscannedSample.length > 0, 'Échantillon hors-cache non vide requis');
+  let unexpectedAllow = 0;
+  for (const r of unscannedSample) {
+    const behavioral = getCachedBehaviorOrAnalyze(r.owner, r.name);
+    const osv = { scanned: false, ref: null };
+    const dec = decide({ behavioral, osv, execution: null });
+    if (dec.verdict === 'ALLOW') unexpectedAllow++;
+  }
+  assert.equal(unexpectedAllow, 0, `Fail-open détecté : ${unexpectedAllow}/${unscannedSample.length} dépôts non analysés ont reçu ALLOW`);
+  console.log(`  ✓ TEST-20 Validé : 0/${unscannedSample.length} dépôts hors-cache n'a reçu ALLOW.`);
+  passedTests++;
+
+  // TEST-21 : I1 — Aucun défaut positif sur entrée vide ou partielle
+  console.log('[TEST-21] Vérification I1 — Aucun défaut positif sur entrée vide ou partielle...');
+  const probes = [
+    {},
+    { behavioral: null },
+    { osv: null },
+    { execution: null },
+    { behavioral: {}, osv: {}, execution: {} },
+    { behavioral: { scanMode: 'METADATA_ONLY' }, osv: { scanned: false } },
+    { behavioral: { scanMode: 'STATIC' }, osv: { scanned: false } }
+  ];
+  for (const probe of probes) {
+    const dec = decide(probe);
+    assert.notEqual(dec.verdict, 'ALLOW', `Défaut positif interdit sur ${JSON.stringify(probe)}`);
+  }
+  assert.equal(evaluatePolicyAction({ verdict: 'INDETERMINATE' }, 'enterprise').action, 'block');
+  assert.equal(evaluatePolicyAction({ verdict: 'INDETERMINATE' }, 'community').action, 'warn');
+  assert.ok(readFileSync(join(__dirname, '../src/engines/evidence.mjs'), 'utf8').includes('INDETERMINATE'));
+  console.log(`  ✓ TEST-21 Validé : 0 défaut positif sur ${probes.length} sondes fail-closed.`);
+  passedTests++;
+
+  // TEST-22 : I2 — Fingerprint déterministe et sensible aux mutations
+  console.log('[TEST-22] Vérification I2 — Déterminisme et sensibilité aux mutations du fingerprint...');
+  const fx = { owner: 'a', name: 'b', commit: 'c1', findings: [], scanMode: 'STATIC' };
+  const fxReordered = { scanMode: 'STATIC', findings: [], commit: 'c1', name: 'b', owner: 'a' };
+  const fp1 = computeCanonicalFingerprint(fx);
+  const fp2 = computeCanonicalFingerprint(fxReordered);
+  assert.equal(fp1, fp2, 'Le fingerprint canonique doit être déterministe et indépendant de l\'ordre des clés');
+  assert.notEqual(computeCanonicalFingerprint({ ...fx, findings: [{ id: 'X', severity: 'LOW' }] }), fp1, 'Mutation de findings doit muter le hash');
+  assert.notEqual(computeCanonicalFingerprint({ ...fx, commit: 'c2' }), fp1, 'Mutation de commit doit muter le hash');
+  console.log('  ✓ TEST-22 Validé : Fingerprint déterministe et strictement sensible aux mutations.');
+  passedTests++;
+
+  // TEST-23 : I3 — Non auto-certification (SCANNER_REPO_ID)
+  console.log('[TEST-23] Vérification I3 — Refus d\'auto-certification...');
+  const prevScannerId = process.env.REPOVERIFY_SCANNER_REPO_ID;
+  const llamaRepo = dbInv.prepare('SELECT id FROM repositories WHERE full_name = ?').get('ggml-org/llama.cpp');
+  try {
+    process.env.REPOVERIFY_SCANNER_REPO_ID = String(llamaRepo.id);
+    const beforeCount = dbInv.prepare('SELECT COUNT(*) as cnt FROM integrity_signatures WHERE subject_repo_id = ?').get(llamaRepo.id).cnt;
+    const selfSignAttempt = await issueIntegritySignature('ggml-org', 'llama.cpp', { includeLiveCi: false });
+    assert.equal(selfSignAttempt.ok, false, 'Le scanner ne doit pas pouvoir signer son propre dépôt');
+    assert.equal(selfSignAttempt.status, 403);
+    const afterCount = dbInv.prepare('SELECT COUNT(*) as cnt FROM integrity_signatures WHERE subject_repo_id = ?').get(llamaRepo.id).cnt;
+    assert.equal(afterCount, beforeCount, 'Aucune signature supplémentaire ne doit être persistée pour SCANNER_REPO_ID');
+  } finally {
+    if (prevScannerId === undefined) delete process.env.REPOVERIFY_SCANNER_REPO_ID;
+    else process.env.REPOVERIFY_SCANNER_REPO_ID = prevScannerId;
+  }
+  console.log('  ✓ TEST-23 Validé : Auto-certification bloquée à l\'émission et absente en base.');
+  passedTests++;
+
+  // TEST-24 : I5 — Preuves liées + révocation fail-closed (DB + contrat)
+  console.log('[TEST-24] Vérification I5 — Références de preuve & rejet des clés révoquées...');
+  const allowRows = dbInv.prepare("SELECT id, evidence_refs_json, keyid FROM integrity_signatures WHERE decision = 'ALLOW'").all();
+  for (const row of allowRows) {
+    const refs = JSON.parse(row.evidence_refs_json || '[]');
+    assert.ok(refs.length > 0, `Signature ${row.id} : ALLOW sans référence de preuve`);
+    const revRow = row.keyid ? dbInv.prepare('SELECT 1 FROM revoked_keys WHERE keyid = ?').get(row.keyid) : null;
+    assert.equal(Boolean(revRow), false, `Signature ${row.id} émise avec une clé révoquée`);
+  }
+  assert.equal(verifyIntegritySignature({ keyid: 'inconnu' }).valid, false);
+  assert.equal(verifyIntegritySignature({ evidenceRefs: [], verdict: 'ALLOW', payloadJson: '{}', signatureEd25519: 'x', publicKeyPem: 'x' }).valid, false);
+  assert.equal(isSignable({ verdict: 'ALLOW', evidenceRefs: [] }), false);
+  assert.equal(isSignable({ verdict: 'ALLOW', evidenceRefs: ['behavioral_facts:1'] }), true);
+
+  const testRevokedKey = 'deadbeef00001111';
+  revokeKeyId(testRevokedKey, 'unit_test_revocation');
+  assert.equal(verifyIntegritySignature({ keyid: testRevokedKey, payloadJson: '{}', signatureEd25519: 'abc', publicKeyPem: 'abc' }).valid, false);
+  dbInv.prepare('DELETE FROM revoked_keys WHERE keyid = ?').run(testRevokedKey);
+  console.log(`  ✓ TEST-24 Validé : ${allowRows.length} ALLOW en base vérifié(s), preuves exigées et clés révoquées rejetées.`);
+  passedTests++;
+
+  // TEST-25 : Recensement honnête (verified <= indexed)
+  console.log('[TEST-25] Vérification du Recensement Honnête (verified <= indexed)...');
+  const census = getHonestCensus();
+  assert.ok(census.indexed >= 200);
+  assert.ok(census.verifiedWithEvidence <= census.indexed, 'verifiedWithEvidence ne doit jamais dépasser indexed');
+  closeDatabase();
+  console.log(`  ✓ TEST-25 Validé : indexés=${census.indexed}, statiques=${census.staticScanned}, vérifiés_avec_preuve=${census.verifiedWithEvidence}.`);
+  passedTests++;
+
+  // TEST-26 : Phase II — Merkle SHA-256, Révocation/TTL, Golden Set & Dedupe
+  console.log('[TEST-26] Vérification Phase II (Merkle, TTL/Révocation, Golden Set, Corpus Dedupe)...');
+  assert.notEqual(leafHash({ a: 1 }), nodeHash('0'.repeat(64), '1'.repeat(64)), 'Séparation de domaine Merkle requise');
+  const leaves = [{ repo: 'a/b', verdict: 'INDETERMINATE' }, { repo: 'c/d', verdict: 'DENY' }, { repo: 'e/f', verdict: 'ALLOW' }];
+  const tree = buildTree(leaves);
+  const proof1 = inclusionProof(tree.levels, 1);
+  assert.equal(verifyProof(leaves[1], proof1, tree.root).valid, true, 'Preuve d\'inclusion Merkle doit être valide');
+  assert.equal(verifyProof({ ...leaves[1], verdict: 'ALLOW' }, proof1, tree.root).valid, false, 'Feuille altérée doit invalider la preuve Merkle');
+
+  assert.equal(badgeState({ issuedAt: '2026-01-01T00:00:00Z' }, new Date('2026-02-01T00:00:00Z'), { ttlDays: 90, graceDays: 30 }).state, 'live');
+  assert.equal(badgeState({ issuedAt: '2026-01-01T00:00:00Z' }, new Date('2026-04-15T00:00:00Z'), { ttlDays: 90, graceDays: 30 }).state, 'stale');
+  assert.equal(badgeState({ issuedAt: '2026-01-01T00:00:00Z' }, new Date('2026-06-01T00:00:00Z'), { ttlDays: 90, graceDays: 30 }).state, 'dead');
+  assert.equal(badgeState({ issuedAt: '2026-01-01T00:00:00Z', revoked: { reason: 'archived' } }, new Date('2026-01-02T00:00:00Z')).state, 'dead');
+
+  const goldenPass = evaluateGolden([
+    { trueClass: 'library', softwareScore: 0.9 },
+    { trueClass: 'dataset', softwareScore: 0.3 }
+  ], 0.7);
+  assert.equal(goldenPass.gate, 'PASS');
+  const goldenFail = evaluateGolden([{ trueClass: 'dataset', softwareScore: 0.85 }], 0.7);
+  assert.equal(goldenFail.fpCert, 1);
+  assert.equal(goldenFail.gate, 'FAIL_FAIL_CLOSED_VIOLE');
+
+  const deduped = dedupe([
+    { input: 'go/go', exists: true, id: 100, canonical: 'golang/go', stars: 125000 },
+    { input: 'golang/go', exists: true, id: 100, canonical: 'golang/go', stars: 125000 },
+    { input: 'fake/ghost', exists: false }
+  ]);
+  assert.equal(deduped.kept.length, 1);
+  assert.equal(deduped.dupes.length, 1);
+  assert.equal(deduped.ghosts.length, 1);
+  assert.equal(executionVerdict({ isolation: 60, instrumented: true, buildExit: 0 }).evidenceLevel, Evidence.OSV_QUERIED);
+  assert.equal(executionVerdict({ isolation: 85, instrumented: true, buildExit: 0 }).evidenceLevel, Evidence.EXECUTED);
+  console.log('  ✓ TEST-26 Validé : Merkle SHA-256, Révocation TTL, Golden Set & Dedupe conformes.');
   passedTests++;
 
   console.log('\n======================================================');

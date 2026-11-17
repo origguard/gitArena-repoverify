@@ -13,6 +13,8 @@
     "ingest": "node src/db/bulk-ingestor.mjs",
     "verify": "node src/engines/sandbox-runner.mjs",
     "guard": "node src/engines/pr-guard.mjs",
+    "rotate-key": "node scripts/rotate-key.mjs",
+    "audit-corpus": "node src/engines/corpus-audit.mjs",
     "video": "node src/studio/video-studio.mjs",
     "tournament-video": "node src/studio/video-studio.mjs --tournament",
     "gif": "node src/studio/gif-encoder.mjs",

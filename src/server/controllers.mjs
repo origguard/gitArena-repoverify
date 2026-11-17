@@ -12,10 +12,13 @@ import {
 } from '../engines/tournament-engine.mjs';
 import {
   getPublicKeyInfo,
-  issueTrustAttestation,
-  verifyTrustAttestation,
-  getRecentTrustAttestations
-} from '../engines/trust-registry.mjs';
+  issueIntegritySignature,
+  verifyIntegritySignature,
+  getRecentIntegritySignatures,
+  getHonestCensus
+} from '../engines/integrity-registry.mjs';
+import { isVerdictsSurfaceExposed } from '../config/flags.mjs';
+import { listRevokedKeys } from '../engines/revocation.mjs';
 import {
   runReproducibleBenchmark,
   getExecutionBenchmarks
@@ -288,14 +291,18 @@ export function getStats(req, res) {
     WHERE LOWER(license) IN (${placeholders})
   `).get(...PERMISSIVE_LICENSES).cnt;
 
+  const census = getHonestCensus();
+
   return sendJson(res, 200, {
     totalRepositories: totalRepos,
-    verifiedExitCodeZeroCount: totalRepos,
+    indexedCount: census.indexed,
+    staticScannedCount: census.staticScanned,
+    verifiedWithEvidenceCount: census.verifiedWithEvidence,
     totalDuelsPlayed: duelsCount,
     totalHarnessRuns: harnessCount,
     commercialSafePercentage: Math.round((permissiveCount / (totalRepos || 1)) * 100),
     averageAiScore: Math.round((avgScoreRow.avgScore || 0) * 10) / 10,
-    inspectorEngine: 'RepoVerify / G0D-PRÆTOR Engine v3.1 (Clean-Room)',
+    inspectorEngine: 'RepoVerify / G0D-PRÆTOR Engine v3.2 (Fail-Closed)',
     status: 'SYSTEM_OPERATIONAL'
   });
 }
@@ -323,21 +330,30 @@ export async function postSandboxVerifyController(req, res) {
   return sendJson(res, 200, result);
 }
 
-/* ==================== PILIER 2 : TRUST REGISTRY & GATEKEEPER ==================== */
+/* ==================== PILIER 2 : REGISTRE DE SIGNATURES D'INTÉGRITÉ ==================== */
 
-export function getTrustPubKeyController(req, res) {
+export function getIntegrityPubKeyController(req, res) {
   return sendJson(res, 200, getPublicKeyInfo());
 }
 
-export function getTrustRegistryController(req, res) {
+export function getIntegrityRegistryController(req, res) {
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
   return sendJson(res, 200, {
     publicKey: getPublicKeyInfo(),
-    attestations: getRecentTrustAttestations(limit)
+    revokedKeys: listRevokedKeys(),
+    census: getHonestCensus(),
+    signatures: getRecentIntegritySignatures(limit)
   });
 }
 
-export async function postTrustAttestController(req, res) {
+export async function postIntegritySignController(req, res) {
+  if (!isVerdictsSurfaceExposed()) {
+    return sendJson(res, 503, {
+      error: 'verdict_surface_disabled',
+      reason: 'Surface d\'émission de verdicts désactivée par défaut (mode fail-closed).',
+      ref: 'RUNBOOK-fail-closed §3 & §6'
+    });
+  }
   const slug = String(req.body?.repo || `${req.params?.owner || ''}/${req.params?.name || ''}`).trim();
   if (!isValidRepoSlug(slug)) {
     return sendJson(res, 400, { error: 'Dépôt invalide (format owner/name requis)' });
@@ -345,15 +361,15 @@ export async function postTrustAttestController(req, res) {
   const [owner, name] = slug.split('/');
   const policyProfile = req.body?.policyProfile || req.query?.policy || 'enterprise';
   const includeLiveCi = req.body?.includeLiveCi !== false && req.query?.live !== 'false';
-  const result = await issueTrustAttestation(owner, name, { policyProfile, includeLiveCi });
+  const result = await issueIntegritySignature(owner, name, { policyProfile, includeLiveCi });
   if (!result.ok) {
     return sendJson(res, result.status || 404, result);
   }
-  return sendJson(res, 200, result.attestation);
+  return sendJson(res, 200, result.signature);
 }
 
-export function postTrustVerifyController(req, res) {
-  const verification = verifyTrustAttestation(req.body || {});
+export function postIntegrityVerifyController(req, res) {
+  const verification = verifyIntegritySignature(req.body || {});
   return sendJson(res, 200, verification);
 }
 

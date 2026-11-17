@@ -114,11 +114,11 @@ export function generatePixelRagTile(repo) {
   <text x="637" y="289" font-size="9" fill="#8892b0" text-anchor="middle">Conforme Clean-Room • Zero Copyleft Risk</text>
 
   <rect x="430" y="325" width="325" height="55" fill="#0b0e14" rx="4" stroke="#2d374d" stroke-width="1" />
-  <text x="445" y="347" font-size="10" fill="#a0aec0">Status : <tspan fill="#00ff88" font-weight="bold">PASS@K 99.8%</tspan> | Latence : <tspan fill="#00f3ff">12 ms</tspan></text>
+  <text x="445" y="347" font-size="10" fill="#a0aec0">Statut : <tspan fill="#00ff88" font-weight="bold">INDEXÉ • ANALYSE STATIQUE</tspan></text>
   <text x="445" y="367" font-size="9" fill="#718096">PixelRAG Visual Tile v1.0 • StarTrail Sovereign Edition</text>
 
   <!-- Barre d'état inférieure -->
-  <text x="400" y="425" font-size="10" fill="#4a5568" text-anchor="middle">GitArena Multimodal Visual Tile • Certifié par Hash Cryptographique SHA-256 [${tileHash.substring(0, 24)}]</text>
+  <text x="400" y="425" font-size="10" fill="#4a5568" text-anchor="middle">GitArena Visual Tile • Signature d'Intégrité SHA-256 [${tileHash.substring(0, 24)}]</text>
 </svg>`;
 
   return {

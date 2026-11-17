@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { getDb, initDatabase, closeDatabase } from '../db/database.mjs';
 import { findRepoInDb } from './repo-service.mjs';
 import { scanDirectoryBehavior, persistBehavioralAudit } from './behavioral-firewall.mjs';
+import { recordBehavioralFacts } from './integrity-registry.mjs';
 import { recordExecutionBenchmark } from './benchmark-runner.mjs';
 
 /**
@@ -210,15 +211,25 @@ export async function runSandboxVerification(owner, name, options = {}) {
       };
     }
 
-    // 1b. Behavioral Firewall Pré-Vol (détection exfiltration / postinstall dangereux)
+    // 1b. Analyse Statique Pré-Vol (détection exfiltration / postinstall dangereux)
     const behaviorRaw = scanDirectoryBehavior(repoDir);
     const behavioralAudit = persistBehavioralAudit(fullName, behaviorRaw);
+    try {
+      recordBehavioralFacts({
+        owner,
+        name,
+        fullName,
+        scanMode: 'STATIC',
+        findings: behaviorRaw.findings || [],
+        scannerVersion: '3.2.0'
+      });
+    } catch { /* ignore in standalone CLI */ }
     if (behavioralAudit.verdict === 'BLOCK_SUSPICIOUS' && !options.force) {
       return {
         ok: false,
-        status: 'BLOCKED_BEHAVIORAL_FIREWALL',
+        status: 'BLOCKED_STATIC_PREFLIGHT',
         behavioralAudit,
-        error: 'Exécution bloquée par le Behavioral Firewall (signaux critiques détectés dans le code source ou les scripts install).',
+        error: 'Exécution bloquée par l\'Analyse Statique Pré-Vol (signaux critiques détectés dans le code source ou les scripts install).',
         capabilities: caps
       };
     }

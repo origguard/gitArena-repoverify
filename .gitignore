@@ -4,10 +4,12 @@ data/
 *.sqlite-wal
 *.sqlite-shm
 
-# Variables d'environnement et secrets
+# Variables d'environnement et custody (hors dépôt)
 .env
 .env.local
+data/keys/
 *.pem
+*.private.pem
 *.key
 
 # Dépendances & caches éventuels

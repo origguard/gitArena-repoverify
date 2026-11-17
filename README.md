@@ -79,8 +79,8 @@ Exécute les tests réels d'un dépôt dans un conteneur Docker sans accès rés
 node src/engines/sandbox-runner.mjs fastapi/fastapi
 ```
 
-### 3. PR Guard CI & Firewall Comportemental (`npm run guard`)
-Bloque automatiquement les dépendances douteuses (`DENY` / `BLOCK_SUSPICIOUS`) dans vos Pull Requests ou en local avant exécution (`preinstall`, `curl | bash`, exfiltration `.ssh`/`.aws`, obfuscation base64/eval) et génère une attestation signée Ed25519 :
+### 3. PR Guard CI & Analyse Statique Pré-Vol (`npm run guard`)
+Analyse statiquement les hooks `preinstall`/`postinstall`, motifs d'exfiltration (`.ssh`/`.aws`/`.env`), licences non permissives et CVE OSV.dev en Pull Request ou en local :
 
 ```bash
 # Audit local hors-ligne avec profil entreprise
@@ -103,7 +103,7 @@ Ajoutez la configuration suivante dans votre client MCP (Antigravity, Cursor, Cl
 }
 ```
 
-Outils MCP exposés (6 outils) : `search_repos`, `inspect_repo`, `get_codeintel`, `compare_repos`, `run_tournament`, `gatekeep_install` (porte d'autorisation Ed25519 avant `npm install` / `pip install` / `git clone`).
+Outils MCP exposés (5 outils) : `search_repos`, `inspect_repo`, `get_codeintel`, `compare_repos`, `run_tournament`. La surface d'émission de verdicts (`gatekeep_install`, `/api/integrity/sign`) est fermée par défaut (`503` / `REPOVERIFY_EXPOSE_VERDICTS !== "true"`).
 
 ---
 
@@ -112,18 +112,22 @@ Outils MCP exposés (6 outils) : `search_repos`, `inspect_repo`, `get_codeintel`
 ```text
 ├── benchmarks/            # Rapports de tournois publics téléchargeables (Markdown, JSON, PDF)
 ├── docs/                  # Spécifications d'architecture (01-PRD à 08-VERIFICATION-HARNESS)
+├── scripts/               # Rotation de clé Ed25519 hors dépôt (rotate-key.mjs)
 ├── src/
-│   ├── db/                # Schéma SQLite WAL/FTS5 (14 tables), Seeder & Bulk Ingestor
-│   ├── engines/           # AI Scoring, ELO, Behavioral Firewall, Trust Ed25519, PR Guard, Benchmarks, Open-Core Licensing, OSV, Sandbox
-│   ├── mcp/               # Serveur Model Context Protocol (stdio JSON-RPC 2.0 — 6 outils dont gatekeep_install)
-│   ├── public/            # SPA Vanilla JS/CSS (Inspecteur, Arène & Tournoi, Radar, Trust & Benchmarks, Explorateur)
-│   ├── server/            # Serveur HTTP souverain, auth Open-Core API Key, anti-traversal et contrôleurs REST
+│   ├── config/            # Drapeaux fail-closed (flags.mjs)
+│   ├── db/                # Schéma SQLite WAL/FTS5 (16 tables), migrations, Seeder & Bulk Ingestor
+│   ├── engines/           # Evidence Model, Integrity Registry Ed25519, Merkle SHA-256, Révocation, Corpus Audit, Recipes, PR Guard, Sandbox
+│   ├── mcp/               # Serveur Model Context Protocol (stdio JSON-RPC 2.0 — 5 outils actifs)
+│   ├── public/            # SPA Vanilla JS/CSS (Inspecteur, Arène & Tournoi, Radar, Signatures & Benchmarks, Explorateur)
+│   ├── server/            # Serveur HTTP souverain, garde 503 fail-closed, auth Open-Core API Key et contrôleurs REST
 │   ├── studio/            # Studio Vidéo MP4, GIF animé, Carrousels PDF LinkedIn & Benchmark Publisher
 │   └── workflows/         # Moteur d'automatisation TCA avec journalisation SHA-256
-├── tests/                 # Harnais de vérification E2E complet (19 tests, process.exit(0))
+├── tests/                 # Harnais de vérification E2E complet (26 tests dont invariants I1-I5 & Phase II, process.exit(0))
 ├── videos/                # Vidéos de duels & tournois 9:16 + carrousels prêts pour les réseaux
 └── .github/workflows/     # Pipeline CI, PR Guard Template & actualisation hebdomadaire des benchmarks
 ```
+
+> **Limites publiées (Portée honnête) :** sur un poste Windows sans Docker (`docker=false`), aucune exécution isolée runtime (eBPF/`strace`) n'a été effectuée ; les entrées en base sont *indexées* (et non exécutées) tant qu'aucune preuve `evidenceLevel >= 3` n'est liée ; les signatures Ed25519 locales sont des signatures d'intégrité (sans TSA RFC 3161 externe ni journal distribué).
 
 ---
 
