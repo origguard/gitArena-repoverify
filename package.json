@@ -20,6 +20,7 @@
     "gif": "node src/studio/gif-encoder.mjs",
     "benchmarks": "node src/studio/benchmark-publisher.mjs",
     "mcp": "node src/mcp/mcp-server.mjs",
+    "controls": "node tests/invariant-controls.mjs",
     "test": "node tests/test-gitarena-e2e.mjs"
   },
   "keywords": [

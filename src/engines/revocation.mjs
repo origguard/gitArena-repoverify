@@ -23,7 +23,9 @@ function daysBetween(isoA, nowDate = new Date()) {
   return (b - a) / 86400000;
 }
 
-export function badgeState(entry, nowDate = new Date(), { ttlDays = 90, graceDays = 30 } = {}) {
+export function badgeState(entry, nowDate = new Date(), cfg = {}) {
+  const ttlDays = cfg.ttlDays ?? cfg.ttl ?? 90;
+  const graceDays = cfg.graceDays ?? cfg.grace ?? 30;
   if (entry?.revoked) {
     return {
       state: 'dead',

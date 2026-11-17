@@ -12,11 +12,20 @@ export const NON_SOFTWARE_CLASSES = new Set([
 export const SOFTWARE_CLASSES = new Set(['library', 'application']);
 
 export function evaluateGolden(golden, threshold = 0.75) {
-  if (!Array.isArray(golden) || golden.length === 0) {
+  const probant = Array.isArray(golden)
+    && golden.length >= 200
+    && golden.every(g => Boolean(g && g.annotated_by && g.arbitrated === true));
+
+  const annotated = Array.isArray(golden)
+    && golden.length > 0
+    && golden.every(g => Boolean(g && g.annotated_by && g.arbitrated === true));
+
+  if (!annotated) {
     return {
-      tp: 0, tn: 0, fp: 0, fn: 0, fpCert: 0,
-      precision: 0, recall: 0, coverage: 0,
-      gate: 'FAIL_EMPTY_GOLDEN_SET'
+      tp: null, tn: null, fp: null, fn: null, fpCert: null,
+      precision: null, recall: null, coverage: null,
+      gate: 'FAIL_JEU_NON_PROBANT',
+      reason: 'jeu vide, synthétique ou non arbitré'
     };
   }
 
@@ -39,6 +48,11 @@ export function evaluateGolden(golden, threshold = 0.75) {
     }
   }
 
+  let gate;
+  if (fpCert > 0) gate = 'FAIL_FAIL_CLOSED_VIOLE';
+  else if (!probant) gate = 'FAIL_JEU_NON_PROBANT';
+  else gate = 'PASS';
+
   return {
     tp,
     tn,
@@ -48,6 +62,6 @@ export function evaluateGolden(golden, threshold = 0.75) {
     precision: tp / Math.max(1, tp + fp),
     recall: tp / Math.max(1, tp + fn),
     coverage: (tp + tn) / golden.length,
-    gate: fpCert === 0 ? 'PASS' : 'FAIL_FAIL_CLOSED_VIOLE'
+    gate
   };
 }

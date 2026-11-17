@@ -74,8 +74,8 @@ export async function runPrGuard(targetDir = process.cwd(), options = {}) {
     : { scanned: false, totalVulnerabilities: 0, maxSeverity: 'NONE', findings: [] };
 
   const blockers = [];
-  if (behavior.verdict === 'BLOCK_SUSPICIOUS') {
-    blockers.push(`Behavioral Firewall : ${behavior.findingsCount} alerte(s) critique(s) (score ${behavior.riskScore}/100)`);
+  if (behavior.verdict === 'DENY' || behavior.riskScore >= 60) {
+    blockers.push(`Analyse Statique Pré-Vol : ${behavior.findingsCount} alerte(s) critique(s) (score ${behavior.riskScore}/100)`);
   }
   if ((policyProfile === 'strict' || policyProfile === 'enterprise') && !isPermissive && detectedLicense !== 'Non spécifiée') {
     blockers.push(`Licence ${detectedLicense} non permissive (risque copyleft)`);

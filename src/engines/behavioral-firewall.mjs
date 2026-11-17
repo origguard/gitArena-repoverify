@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { getDb } from '../db/database.mjs';
+import { decide } from './evidence.mjs';
 
 /**
  * Analyse Comportementale Statique (Pre-Flight) — Pilier 1 (RepoVerify / GitArena)
@@ -106,7 +107,7 @@ export function scanTextBehavior(content, fileLabel = 'source') {
   return findings;
 }
 
-export function summarizeBehavioralFindings(findings, scanMode = 'STATIC_PREFLIGHT') {
+export function summarizeBehavioralFindings(findings, scanMode = 'STATIC', context = {}) {
   // Dédupliquer par ruleId + file
   const uniqueMap = new Map();
   for (const f of findings) {
@@ -117,28 +118,25 @@ export function summarizeBehavioralFindings(findings, scanMode = 'STATIC_PREFLIG
   unique.sort((a, b) => (SEVERITY_RANK[b.severity] || 0) - (SEVERITY_RANK[a.severity] || 0));
 
   let rawRisk = 0;
-  let hasCritical = false;
-  let hasHigh = false;
   for (const f of unique) {
     rawRisk += f.weight || 0;
-    if (f.severity === 'CRITICAL') hasCritical = true;
-    if (f.severity === 'HIGH') hasHigh = true;
   }
 
   const riskScore = Math.min(100, rawRisk);
-  let verdict = 'STATIC_CLEAN';
-  if (hasCritical || riskScore >= 60) {
-    verdict = 'BLOCK_SUSPICIOUS';
-  } else if (hasHigh || riskScore >= 25) {
-    verdict = 'REVIEW_REQUIRED';
-  }
+  const normalizedMode = scanMode === 'DIR_NOT_FOUND' ? null : 'STATIC';
+  const decided = decide({
+    behavioral: normalizedMode ? { scanMode: normalizedMode, findings: unique, ref: context.ref || null } : null,
+    osv: context.osv || null,
+    execution: context.execution || null
+  });
 
   return {
-    verdict,
+    scanMode,
+    verdict: decided.verdict,
+    evidenceLevel: decided.evidenceLevel,
     riskScore,
     findingsCount: unique.length,
-    findings: unique.slice(0, 25),
-    scanMode
+    findings: unique.slice(0, 25)
   };
 }
 

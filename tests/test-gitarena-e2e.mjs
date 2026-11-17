@@ -493,11 +493,12 @@ async function runE2eHarness() {
   const hookFindings = scanPackageJsonHooks(maliciousPkg);
   assert.equal(hookFindings[0].severity, 'CRITICAL');
   const sshFindings = scanTextBehavior("const k = fs.readFileSync('~/.ssh/id_rsa'); eval(Buffer.from('YQ==','base64').toString());", 'bad.js');
-  const summaryMal = summarizeBehavioralFindings([...hookFindings, ...sshFindings], 'TEST');
-  assert.equal(summaryMal.verdict, 'BLOCK_SUSPICIOUS');
+  const summaryMal = summarizeBehavioralFindings([...hookFindings, ...sshFindings], 'STATIC');
+  assert.equal(summaryMal.verdict, 'DENY');
   assert.ok(summaryMal.riskScore >= 60);
   const selfScan = scanDirectoryBehavior(join(__dirname, '..', 'src'));
-  assert.notEqual(selfScan.verdict, 'BLOCK_SUSPICIOUS', 'Le code propre du projet ne doit pas être bloqué');
+  assert.notEqual(selfScan.verdict, 'DENY', 'Le code propre du projet ne doit pas être bloqué');
+  assert.notEqual(selfScan.verdict, 'STATIC_CLEAN', 'verdict doit être issu de decide() (INDETERMINATE/ALLOW/WARN/DENY)');
   console.log(`  ✓ TEST-14 Validé : Behavioral Firewall bloque les vecteurs malveillants (Risk=${summaryMal.riskScore}/100).`);
   passedTests++;
 
@@ -705,12 +706,19 @@ async function runE2eHarness() {
   assert.equal(badgeState({ issuedAt: '2026-01-01T00:00:00Z' }, new Date('2026-06-01T00:00:00Z'), { ttlDays: 90, graceDays: 30 }).state, 'dead');
   assert.equal(badgeState({ issuedAt: '2026-01-01T00:00:00Z', revoked: { reason: 'archived' } }, new Date('2026-01-02T00:00:00Z')).state, 'dead');
 
-  const goldenPass = evaluateGolden([
-    { trueClass: 'library', softwareScore: 0.9 },
-    { trueClass: 'dataset', softwareScore: 0.3 }
-  ], 0.7);
+  const nonProbant = evaluateGolden([{ trueClass: 'library', softwareScore: 0.9 }], 0.7);
+  assert.equal(nonProbant.gate, 'FAIL_JEU_NON_PROBANT');
+  assert.equal(nonProbant.fpCert, null);
+
+  const probant200 = Array.from({ length: 200 }, (_, i) => ({
+    trueClass: i % 2 === 0 ? 'library' : 'dataset',
+    softwareScore: i % 2 === 0 ? 0.9 : 0.3,
+    annotated_by: 'human-auditor',
+    arbitrated: true
+  }));
+  const goldenPass = evaluateGolden(probant200, 0.7);
   assert.equal(goldenPass.gate, 'PASS');
-  const goldenFail = evaluateGolden([{ trueClass: 'dataset', softwareScore: 0.85 }], 0.7);
+  const goldenFail = evaluateGolden([{ trueClass: 'dataset', softwareScore: 0.85, annotated_by: 'human-auditor', arbitrated: true }], 0.7);
   assert.equal(goldenFail.fpCert, 1);
   assert.equal(goldenFail.gate, 'FAIL_FAIL_CLOSED_VIOLE');
 

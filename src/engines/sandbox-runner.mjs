@@ -224,7 +224,7 @@ export async function runSandboxVerification(owner, name, options = {}) {
         scannerVersion: '3.2.0'
       });
     } catch { /* ignore in standalone CLI */ }
-    if (behavioralAudit.verdict === 'BLOCK_SUSPICIOUS' && !options.force) {
+    if ((behavioralAudit.verdict === 'DENY' || behavioralAudit.riskScore >= 60) && !options.force) {
       return {
         ok: false,
         status: 'BLOCKED_STATIC_PREFLIGHT',
