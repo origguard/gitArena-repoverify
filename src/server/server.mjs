@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { SovereignRouter } from './router.mjs';
 import * as controllers from './controllers.mjs';
 import { initDatabase } from '../db/database.mjs';
+import { resolveRequestLicenseContext } from '../engines/license-tier.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -37,9 +38,24 @@ export function createGitArenaServer() {
   router.get('/api/workflows/status', controllers.getWorkflowsStatusController);
   router.post('/api/workflows/run', controllers.postWorkflowRunController);
 
-  // Sandbox Docker isolé (vérification réelle Exit Code 0)
+  // Sandbox Docker isolé & Behavioral Firewall (Pilier 1)
   router.get('/api/sandbox/capabilities', controllers.getSandboxCapabilitiesController);
   router.post('/api/sandbox/verify', controllers.postSandboxVerifyController);
+
+  // Trust Registry Ed25519 & Gatekeeper (Pilier 2)
+  router.get('/api/trust/pubkey', controllers.getTrustPubKeyController);
+  router.get('/api/trust/registry', controllers.getTrustRegistryController);
+  router.get('/api/trust/attest/:owner/:name', controllers.postTrustAttestController);
+  router.post('/api/trust/attest', controllers.postTrustAttestController);
+  router.post('/api/trust/verify', controllers.postTrustVerifyController);
+
+  // Benchmarks d'Exécution Chronométrés (Pilier 3)
+  router.get('/api/benchmarks/execution', controllers.getExecutionBenchmarksController);
+  router.post('/api/benchmarks/execution/run', controllers.postExecutionBenchmarkRunController);
+
+  // Plan de Contrôle Open-Core (Pilier 4)
+  router.get('/api/license/status', controllers.getLicenseStatusController);
+  router.post('/api/license/issue', controllers.postLicenseIssueController);
 
   // Statistiques globales
   router.get('/api/stats', controllers.getStats);
@@ -47,13 +63,23 @@ export function createGitArenaServer() {
   const server = createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-RepoVerify-Key, Authorization');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       return res.end();
+    }
+
+    // Résolution du palier de licence Open-Core sur /api/*
+    if (req.url && req.url.startsWith('/api/')) {
+      const licCtx = resolveRequestLicenseContext(req);
+      if (!licCtx.authorized) {
+        res.writeHead(licCtx.status || 401, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: licCtx.error }));
+      }
+      req.licenseContext = licCtx;
     }
 
     try {

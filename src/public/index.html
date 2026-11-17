@@ -49,6 +49,9 @@
     <button class="nav-tab" data-tab="explorer" onclick="switchTab('explorer')">
       <span>📚</span> Explorateur FTS5
     </button>
+    <button class="nav-tab" data-tab="trust" onclick="switchTab('trust')">
+      <span>🛡️</span> Trust Registry &amp; Benchmarks
+    </button>
   </nav>
 
   <!-- Main Container -->
@@ -267,6 +270,50 @@
           <button class="quick-pill" id="prevPageBtn" onclick="changeExplorerPage(-1)">◀ Précédent</button>
           <button class="quick-pill" id="nextPageBtn" onclick="changeExplorerPage(1)">Suivant ▶</button>
         </div>
+      </div>
+    </div>
+
+    <!-- ==================== ONGLET 5 : TRUST REGISTRY & BENCHMARKS ==================== -->
+    <div id="tab-trust" class="tab-panel">
+      <div class="arena-toolbar" style="flex-direction:column; align-items:stretch;">
+        <div>
+          <h2 style="font-size: 1.25rem; color: #fff; font-weight: 800;">🛡️ Sovereign Trust Registry (Ed25519) &amp; Benchmarks d'Exécution</h2>
+          <p style="font-size: 0.82rem; color: var(--text-muted);">
+            Porte de contrôle Gatekeeper pour agents IA (ALLOW / WARN / DENY), signature cryptographique Ed25519 hors-ligne, benchmarks chronométrés et palier Open-Core.
+          </p>
+        </div>
+        <div class="filter-bar" style="margin:0.5rem 0 0 0;">
+          <input type="text" id="trustRepoInput" class="filter-input" value="huggingface/transformers" placeholder="owner/repo (ex: huggingface/transformers)" style="flex:1; min-width:220px;">
+          <select id="trustPolicySelect" class="filter-select">
+            <option value="enterprise">Politique : Enterprise</option>
+            <option value="strict">Politique : Strict (Zero Tolerance)</option>
+            <option value="startup">Politique : Startup</option>
+          </select>
+          <button class="report-action-btn report-action-link" onclick="issueAndShowAttestation()">
+            🔐 Émettre Attestation Ed25519
+          </button>
+          <button class="report-action-btn" onclick="runRepoExecutionBenchmark()">
+            ⏱️ Lancer Benchmark Exécution
+          </button>
+        </div>
+      </div>
+
+      <div id="trustGateResult" style="margin-bottom:1.25rem;"></div>
+
+      <div class="diagnostic-grid" style="grid-template-columns: 1fr 1fr;">
+        <div class="diag-card">
+          <div class="diag-card-title"><span>📜</span> Registre des Attestations Signées (Ed25519)</div>
+          <div id="trustRegistryList" style="font-size:0.8rem; color:var(--text-muted);">Chargement...</div>
+        </div>
+        <div class="diag-card">
+          <div class="diag-card-title"><span>⚡</span> Benchmarks d'Exécution Chronométrés</div>
+          <div id="execBenchmarksList" style="font-size:0.8rem; color:var(--text-muted);">Chargement...</div>
+        </div>
+      </div>
+
+      <div class="alternatives-section" style="margin-top:1.25rem;">
+        <div class="diag-card-title"><span>🔑</span> Clé Publique Ed25519 &amp; Statut Open-Core</div>
+        <div id="trustNodeMeta" style="font-family:var(--font-mono); font-size:0.74rem; color:var(--text-muted);"></div>
       </div>
     </div>
 

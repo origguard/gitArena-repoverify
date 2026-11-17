@@ -11,6 +11,21 @@ import {
   buildTournamentMarkdown
 } from '../engines/tournament-engine.mjs';
 import {
+  getPublicKeyInfo,
+  issueTrustAttestation,
+  verifyTrustAttestation,
+  getRecentTrustAttestations
+} from '../engines/trust-registry.mjs';
+import {
+  runReproducibleBenchmark,
+  getExecutionBenchmarks
+} from '../engines/benchmark-runner.mjs';
+import {
+  issueOrgLicense,
+  getOrgPoliciesSnapshot,
+  TIERS
+} from '../engines/license-tier.mjs';
+import {
   PERMISSIVE_LICENSES,
   inspectRepository,
   inspectCodeIntelligence,
@@ -306,4 +321,87 @@ export async function postSandboxVerifyController(req, res) {
     allowLocal: Boolean(req.body?.allowLocal)
   });
   return sendJson(res, 200, result);
+}
+
+/* ==================== PILIER 2 : TRUST REGISTRY & GATEKEEPER ==================== */
+
+export function getTrustPubKeyController(req, res) {
+  return sendJson(res, 200, getPublicKeyInfo());
+}
+
+export function getTrustRegistryController(req, res) {
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  return sendJson(res, 200, {
+    publicKey: getPublicKeyInfo(),
+    attestations: getRecentTrustAttestations(limit)
+  });
+}
+
+export async function postTrustAttestController(req, res) {
+  const slug = String(req.body?.repo || `${req.params?.owner || ''}/${req.params?.name || ''}`).trim();
+  if (!isValidRepoSlug(slug)) {
+    return sendJson(res, 400, { error: 'Dépôt invalide (format owner/name requis)' });
+  }
+  const [owner, name] = slug.split('/');
+  const policyProfile = req.body?.policyProfile || req.query?.policy || 'enterprise';
+  const includeLiveCi = req.body?.includeLiveCi !== false && req.query?.live !== 'false';
+  const result = await issueTrustAttestation(owner, name, { policyProfile, includeLiveCi });
+  if (!result.ok) {
+    return sendJson(res, result.status || 404, result);
+  }
+  return sendJson(res, 200, result.attestation);
+}
+
+export function postTrustVerifyController(req, res) {
+  const verification = verifyTrustAttestation(req.body || {});
+  return sendJson(res, 200, verification);
+}
+
+/* ==================== PILIER 3 : BENCHMARKS D'EXÉCUTION ==================== */
+
+export function getExecutionBenchmarksController(req, res) {
+  const repo = req.query.repo ? String(req.query.repo).trim() : null;
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  return sendJson(res, 200, { items: getExecutionBenchmarks(repo, limit) });
+}
+
+export function postExecutionBenchmarkRunController(req, res) {
+  const slug = String(req.body?.repo || '').trim();
+  if (!isValidRepoSlug(slug)) {
+    return sendJson(res, 400, { error: 'Paramètre repo invalide (owner/name requis)' });
+  }
+  const result = runReproducibleBenchmark(slug);
+  if (!result.ok) {
+    return sendJson(res, 404, result);
+  }
+  return sendJson(res, 200, result);
+}
+
+/* ==================== PILIER 4 : PLAN DE CONTRÔLE OPEN-CORE ==================== */
+
+export function getLicenseStatusController(req, res) {
+  return sendJson(res, 200, {
+    activeTier: req.licenseContext?.tier || 'community',
+    orgId: req.licenseContext?.orgId || 'local-community',
+    availableTiers: TIERS,
+    requireApiKeyMode: process.env.REPOVERIFY_REQUIRE_API_KEY === 'true',
+    registeredOrgs: getOrgPoliciesSnapshot()
+  });
+}
+
+export function postLicenseIssueController(req, res) {
+  const remoteAddr = req.socket?.remoteAddress || '';
+  const isLocalhost = remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
+  if (!isLocalhost) {
+    return sendJson(res, 403, { error: 'Émission de licence restreinte à localhost (127.0.0.1)' });
+  }
+  const orgId = String(req.body?.orgId || '').trim();
+  const tier = String(req.body?.tier || 'pro').trim();
+  const validDays = parseInt(req.body?.validDays || '365', 10);
+  try {
+    const issued = issueOrgLicense({ orgId, tier, validDays });
+    return sendJson(res, 200, issued);
+  } catch (err) {
+    return sendJson(res, 400, { error: err.message });
+  }
 }

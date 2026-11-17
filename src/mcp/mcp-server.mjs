@@ -7,6 +7,7 @@ import {
   getArenaDuel
 } from '../engines/repo-service.mjs';
 import { runMultiRepoTournament } from '../engines/tournament-engine.mjs';
+import { issueTrustAttestation } from '../engines/trust-registry.mjs';
 
 /**
  * Serveur MCP Souverain (Model Context Protocol) sur stdio (JSON-RPC 2.0)
@@ -80,6 +81,19 @@ const TOOLS = [
         category: { type: 'string', description: 'Catégorie technologique à évaluer si repos non fournis' },
         profile: { type: 'string', enum: ['enterprise', 'startup', 'ai_training', 'balanced'], description: 'Profil de pondération métier (défaut: enterprise)' },
         limit: { type: 'number', description: 'Nombre de candidats (4 à 8, défaut 6)' }
+      }
+    }
+  },
+  {
+    name: 'gatekeep_install',
+    description: 'Porte de contrôle de sécurité obligatoire pour agents IA avant tout npm install / pip install / git clone : évalue Licence, Activité, Bus Factor, CVE OSV.dev & Behavioral Firewall et émet une attestation signée Ed25519 (ALLOW / WARN / DENY).',
+    inputSchema: {
+      type: 'object',
+      required: ['repo'],
+      properties: {
+        repo: { type: 'string', description: 'Dépôt candidat (owner/name ou URL GitHub)' },
+        policyProfile: { type: 'string', enum: ['enterprise', 'strict', 'startup'], description: 'Niveau d\'exigence (défaut: enterprise)' },
+        includeLiveCi: { type: 'boolean', description: 'Vérifier GitHub Actions en direct (défaut: true)' }
       }
     }
   }
@@ -194,6 +208,25 @@ export async function handleMcpRequest(msg) {
           limit: args.limit || 6,
           includeLiveChecks: args.includeLiveChecks !== false
         });
+      } else if (toolName === 'gatekeep_install') {
+        const parsed = parseOwnerName(args.repo);
+        if (!parsed) {
+          return writeResponse(id, {
+            isError: true,
+            content: [{ type: 'text', text: 'Format invalide : utilisez owner/name (ex: huggingface/transformers)' }]
+          });
+        }
+        const resGate = await issueTrustAttestation(parsed.owner, parsed.name, {
+          policyProfile: args.policyProfile || 'enterprise',
+          includeLiveCi: args.includeLiveCi !== false
+        });
+        if (!resGate.ok) {
+          return writeResponse(id, {
+            isError: true,
+            content: [{ type: 'text', text: resGate.error || 'Dépôt introuvable' }]
+          });
+        }
+        resultObj = resGate.attestation;
       } else {
         return writeError(id, -32601, `Outil MCP inconnu : ${toolName}`);
       }

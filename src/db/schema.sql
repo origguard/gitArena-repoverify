@@ -161,3 +161,59 @@ CREATE TABLE IF NOT EXISTS arena_tournaments (
     winner_full_name TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- 11. Pilier 1 : Audits Comportementaux (Runtime Behavioral Firewall)
+CREATE TABLE IF NOT EXISTS behavioral_audits (
+    id TEXT PRIMARY KEY,
+    full_name TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    risk_score INTEGER NOT NULL DEFAULT 0,
+    findings_json TEXT NOT NULL,
+    scan_mode TEXT NOT NULL,
+    receipt_sha256 TEXT NOT NULL,
+    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_behavior_repo ON behavioral_audits(full_name);
+
+-- 12. Pilier 2 : Registre de Confiance Signé Ed25519 (Trust Registry)
+CREATE TABLE IF NOT EXISTS trust_attestations (
+    id TEXT PRIMARY KEY,
+    full_name TEXT NOT NULL,
+    policy_profile TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    trust_score INTEGER NOT NULL,
+    violations_json TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    signature_ed25519 TEXT NOT NULL,
+    public_key_pem TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    issued_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_trust_repo ON trust_attestations(full_name);
+
+-- 13. Pilier 3 : Benchmarks d'Exécution Chronométrés
+CREATE TABLE IF NOT EXISTS execution_benchmarks (
+    id TEXT PRIMARY KEY,
+    repo_full_name TEXT NOT NULL,
+    suite_name TEXT NOT NULL,
+    cold_start_ms REAL NOT NULL,
+    throughput_ops REAL NOT NULL DEFAULT 0,
+    peak_ram_mb REAL NOT NULL,
+    exit_code INTEGER NOT NULL DEFAULT 0,
+    env_fingerprint TEXT NOT NULL,
+    receipt_sha256 TEXT NOT NULL,
+    executed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_exec_bench_repo ON execution_benchmarks(repo_full_name);
+
+-- 14. Pilier 4 : Politiques d'Organisation & Licences Open-Core
+CREATE TABLE IF NOT EXISTS org_policies (
+    org_id TEXT PRIMARY KEY,
+    tier TEXT NOT NULL DEFAULT 'community',
+    policy_json TEXT NOT NULL,
+    license_token TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

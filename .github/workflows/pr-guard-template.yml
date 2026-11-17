@@ -1,0 +1,24 @@
+# Template prêt à copier dans `.github/workflows/pr-guard.yml` de vos dépôts clients
+# Bloque automatiquement toute PR introduisant un script postinstall suspect, une licence copyleft ou une CVE critique.
+name: RepoVerify PR Guard
+
+on:
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  repoverify-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Run RepoVerify PR Guard
+        run: |
+          npx --yes --package=git+https://github.com/origguard/gitArena-repoverify.git -c "node src/engines/pr-guard.mjs ." || \
+          (git clone --depth 1 https://github.com/origguard/gitArena-repoverify.git /tmp/repoverify && node /tmp/repoverify/src/engines/pr-guard.mjs "$GITHUB_WORKSPACE")

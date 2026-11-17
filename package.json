@@ -12,6 +12,7 @@
     "seed": "node src/db/seeder.mjs",
     "ingest": "node src/db/bulk-ingestor.mjs",
     "verify": "node src/engines/sandbox-runner.mjs",
+    "guard": "node src/engines/pr-guard.mjs",
     "video": "node src/studio/video-studio.mjs",
     "tournament-video": "node src/studio/video-studio.mjs --tournament",
     "gif": "node src/studio/gif-encoder.mjs",

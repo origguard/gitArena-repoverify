@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { getDb, initDatabase, closeDatabase } from '../db/database.mjs';
 import { findRepoInDb } from './repo-service.mjs';
+import { scanDirectoryBehavior, persistBehavioralAudit } from './behavioral-firewall.mjs';
+import { recordExecutionBenchmark } from './benchmark-runner.mjs';
 
 /**
  * Sandbox Runner Isolé — Preuve d'Exécution Réelle Exit Code 0
@@ -208,6 +210,19 @@ export async function runSandboxVerification(owner, name, options = {}) {
       };
     }
 
+    // 1b. Behavioral Firewall Pré-Vol (détection exfiltration / postinstall dangereux)
+    const behaviorRaw = scanDirectoryBehavior(repoDir);
+    const behavioralAudit = persistBehavioralAudit(fullName, behaviorRaw);
+    if (behavioralAudit.verdict === 'BLOCK_SUSPICIOUS' && !options.force) {
+      return {
+        ok: false,
+        status: 'BLOCKED_BEHAVIORAL_FIREWALL',
+        behavioralAudit,
+        error: 'Exécution bloquée par le Behavioral Firewall (signaux critiques détectés dans le code source ou les scripts install).',
+        capabilities: caps
+      };
+    }
+
     // 2. Plan d'exécution selon les manifestes clonés
     const plan = buildSandboxExecutionPlan(repoDir, repoRecord?.language);
     let execResult;
@@ -220,6 +235,8 @@ export async function runSandboxVerification(owner, name, options = {}) {
         '--memory=1024m',
         '--cpus=1',
         '--pids-limit=64',
+        '--cap-drop=ALL',
+        '--security-opt=no-new-privileges',
         '-v', `${repoDir}:/workspace`,
         '-w', '/workspace',
         plan.image,
@@ -259,6 +276,13 @@ export async function runSandboxVerification(owner, name, options = {}) {
           Math.round((process.memoryUsage().heapUsed / (1024 * 1024)) * 100) / 100,
           receiptHash
         );
+        recordExecutionBenchmark({
+          fullName,
+          suiteName: mode,
+          coldStartMs: execResult.durationMs,
+          throughputOps: execResult.durationMs > 0 ? Math.round((1000 / execResult.durationMs) * 100) / 100 : 0,
+          exitCode: execResult.exitCode
+        });
       } catch { /* ignore persistence errors */ }
     }
 
@@ -273,6 +297,7 @@ export async function runSandboxVerification(owner, name, options = {}) {
       exitCode: execResult.exitCode,
       durationMs: execResult.durationMs,
       timedOut: execResult.timedOut,
+      behavioralAudit,
       stdout: execResult.stdout,
       stderr: execResult.stderr,
       receiptHash,

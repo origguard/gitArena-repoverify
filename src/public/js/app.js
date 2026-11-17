@@ -49,6 +49,8 @@ function switchTab(tabName) {
     loadRadarView();
   } else if (tabName === 'explorer') {
     searchExplorer();
+  } else if (tabName === 'trust') {
+    loadTrustHub();
   }
 }
 
@@ -386,6 +388,9 @@ function renderInspectionReport(data) {
           </button>
           <button class="report-action-btn" onclick="triggerSandboxVerification('${escapeHtml(repo.full_name)}')">
             🧪 Sandbox Exit 0
+          </button>
+          <button class="report-action-btn" onclick="attestRepoInTrustTab('${escapeHtml(repo.full_name)}')">
+            🔐 Attestation Ed25519
           </button>
           <button class="report-action-btn" onclick="copyBadgeMarkdown('${escapeHtml(repo.full_name)}')">
             🛡️ Copier Badge
@@ -1176,6 +1181,153 @@ async function triggerSandboxVerification(fullName) {
   } catch (err) {
     box.innerHTML = `<div style="color:var(--accent-pink); font-size:0.78rem;">Erreur Sandbox : ${escapeHtml(err.message)}</div>`;
   }
+}
+
+/* ==================== PILIER 2, 3, 4 : TRUST REGISTRY & BENCHMARKS ==================== */
+
+function attestRepoInTrustTab(fullName) {
+  const input = document.getElementById('trustRepoInput');
+  if (input) input.value = fullName;
+  switchTab('trust');
+  issueAndShowAttestation();
+}
+
+async function loadTrustHub() {
+  const regEl = document.getElementById('trustRegistryList');
+  const benchEl = document.getElementById('execBenchmarksList');
+  const metaEl = document.getElementById('trustNodeMeta');
+
+  try {
+    const [regRes, benchRes, licRes] = await Promise.all([
+      fetch('/api/trust/registry?limit=10'),
+      fetch('/api/benchmarks/execution?limit=10'),
+      fetch('/api/license/status')
+    ]);
+
+    if (regRes.ok && regEl) {
+      const regData = await regRes.json();
+      const items = regData.attestations || [];
+      regEl.innerHTML = items.length === 0
+        ? '<p style="color:var(--text-dim);">Aucune attestation émise pour le moment.</p>'
+        : items.map(a => `
+            <div style="display:flex; justify-content:space-between; padding:0.4rem 0; border-bottom:1px solid var(--border-subtle);">
+              <span><strong>${escapeHtml(a.full_name)}</strong> <span style="color:var(--text-dim);">(${escapeHtml(a.policy_profile)})</span></span>
+              <span style="font-family:var(--font-mono); color:${a.decision === 'ALLOW' ? 'var(--accent-green)' : (a.decision === 'DENY' ? 'var(--accent-pink)' : 'var(--accent-amber)')};">
+                ${escapeHtml(a.decision)} • ${a.trust_score}/100
+              </span>
+            </div>
+          `).join('');
+
+      if (metaEl && regData.publicKey) {
+        const licData = licRes.ok ? await licRes.json() : {};
+        metaEl.innerHTML = `
+          <div><strong>Algorithme :</strong> ${escapeHtml(regData.publicKey.algorithm)} • <strong>Empreinte Clé Publique :</strong> ${escapeHtml(regData.publicKey.keyFingerprint)}</div>
+          <div style="margin-top:0.35rem;"><strong>Palier Open-Core Actif :</strong> ${escapeHtml(licData.activeTier || 'community')} (Org: ${escapeHtml(licData.orgId || 'local-community')})</div>
+        `;
+      }
+    }
+
+    if (benchRes.ok && benchEl) {
+      const benchData = await benchRes.json();
+      const items = benchData.items || [];
+      benchEl.innerHTML = items.length === 0
+        ? '<p style="color:var(--text-dim);">Aucun benchmark d\'exécution enregistré. Lancez-en un ci-dessus !</p>'
+        : items.map(b => `
+            <div style="display:flex; justify-content:space-between; padding:0.4rem 0; border-bottom:1px solid var(--border-subtle);">
+              <span><strong>${escapeHtml(b.repo_full_name)}</strong> <span style="color:var(--text-dim);">(${escapeHtml(b.suite_name)})</span></span>
+              <span style="font-family:var(--font-mono); color:var(--accent-cyan);">
+                ${b.cold_start_ms} ms • ${Math.round(b.throughput_ops)} ops/s • Exit ${b.exit_code}
+              </span>
+            </div>
+          `).join('');
+    }
+  } catch (err) {
+    console.warn('[TRUST-HUB]', err);
+  }
+}
+
+async function issueAndShowAttestation() {
+  const repo = document.getElementById('trustRepoInput')?.value.trim();
+  const policyProfile = document.getElementById('trustPolicySelect')?.value || 'enterprise';
+  const box = document.getElementById('trustGateResult');
+  if (!repo || !box) return;
+
+  box.innerHTML = `<div class="state-loading"><p>Évaluation Gatekeeper & Signature Ed25519 pour <strong>${escapeHtml(repo)}</strong>...</p></div>`;
+
+  try {
+    const res = await fetch('/api/trust/attest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo, policyProfile })
+    });
+    const att = await res.json();
+    if (!res.ok) throw new Error(att.error || 'Erreur attestation');
+
+    window._lastAttestation = att;
+    const decColor = att.decision === 'ALLOW' ? 'var(--accent-green)' : (att.decision === 'DENY' ? 'var(--accent-pink)' : 'var(--accent-amber)');
+
+    box.innerHTML = `
+      <div class="report-header" style="border-color:${decColor};">
+        <div class="report-title-area">
+          <div style="font-family:var(--font-mono); font-size:0.8rem; color:${decColor}; font-weight:700;">
+            VERDICT GATEKEEPER : ${escapeHtml(att.decision)} (TRUST SCORE : ${att.trustScore}/100)
+          </div>
+          <div class="report-repo-name">${escapeHtml(att.fullName)}</div>
+          <div style="font-size:0.8rem; color:var(--text-muted); margin-top:0.35rem;">
+            Licence : <code>${escapeHtml(att.summary.license)}</code> • Bus Factor : <strong>${escapeHtml(att.summary.busFactorRisk)}</strong> • Behavioral : <strong>${escapeHtml(att.summary.behavioralVerdict)}</strong>
+          </div>
+          ${(att.violations || []).length > 0 ? `
+            <div style="margin-top:0.5rem; color:var(--accent-pink); font-size:0.8rem;">
+              ${att.violations.map(v => `<div>✗ [${escapeHtml(v.gate)}] ${escapeHtml(v.message)}</div>`).join('')}
+            </div>` : ''}
+          ${(att.warnings || []).length > 0 ? `
+            <div style="margin-top:0.5rem; color:var(--accent-amber); font-size:0.8rem;">
+              ${att.warnings.map(w => `<div>⚠ [${escapeHtml(w.gate)}] ${escapeHtml(w.message)}</div>`).join('')}
+            </div>` : ''}
+          <div style="font-family:var(--font-mono); font-size:0.7rem; color:var(--text-dim); margin-top:0.65rem; word-break:break-all;">
+            Signature Ed25519 : ${escapeHtml(att.signatureEd25519)}
+          </div>
+          <div class="report-actions-bar">
+            <button class="report-action-btn report-action-link" onclick="verifyLastAttestation()">🔍 Vérifier Signature Hors-Ligne</button>
+          </div>
+          <div id="verifySigOutput" style="margin-top:0.5rem; font-size:0.78rem;"></div>
+        </div>
+      </div>`;
+
+    loadTrustHub();
+  } catch (err) {
+    box.innerHTML = `<div class="state-empty" style="color:var(--accent-pink);">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function verifyLastAttestation() {
+  const out = document.getElementById('verifySigOutput');
+  if (!window._lastAttestation || !out) return;
+  const res = await fetch('/api/trust/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(window._lastAttestation)
+  });
+  const data = await res.json();
+  out.innerHTML = data.valid
+    ? `<span style="color:var(--accent-green);">✓ ${escapeHtml(data.reason)} (SHA-256: ${escapeHtml(data.computedSha256.slice(0, 20))}...)</span>`
+    : `<span style="color:var(--accent-pink);">✗ ${escapeHtml(data.reason)}</span>`;
+}
+
+async function runRepoExecutionBenchmark() {
+  const repo = document.getElementById('trustRepoInput')?.value.trim();
+  if (!repo) return;
+  const res = await fetch('/api/benchmarks/execution/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo })
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    alert(data.error || 'Erreur benchmark');
+    return;
+  }
+  loadTrustHub();
 }
 
 function escapeHtml(str) {
