@@ -8,6 +8,23 @@
 
 > **100 % Node.js ESM natif** • **Zéro dépendance NPM externe** • **SQLite WAL + FTS5 sub-milliseconde** • **Audit Supply-Chain OSV.dev & CI/CD en direct**
 
+<!-- ASTUCE GITHUB : Pour activer le lecteur vidéo HTML5 intégré directement sur GitHub.com, ouvrez ce README en mode Edit sur github.com et glissez-déposez `videos/05-tournoi-6-frameworks-ia.mp4` juste en dessous. -->
+[![Regarder la démo Tournoi Survival (6 Frameworks IA)](assets/video-preview-tournament.svg)](videos/05-tournoi-6-frameworks-ia.mp4)
+
+---
+
+## 🎬 Démos, Duels & Tournois Vidéo (Prêts pour Réseaux)
+
+| Format | Comparatif | Vidéo MP4 (9:16) | Ressources Associées |
+| :--- | :--- | :--- | :--- |
+| **🏆 Tournoi (6 repos)** | **LangGraph vs CrewAI vs AutoGen vs Crawl4AI vs Firecrawl vs OpenHands** | [▶ Voir la vidéo (26s)](videos/05-tournoi-6-frameworks-ia.mp4) | [📕 Carrousel PDF](videos/05-tournoi-6-frameworks-ia-carousel.pdf) • [📝 Post FR/EN](videos/05-tournoi-6-frameworks-ia-post.md) |
+| **⚔️ Duel 1 vs 1** | **Crawl4AI (`Apache-2.0`) vs Firecrawl (`AGPL-3.0`)** | [▶ Voir la vidéo (22s)](videos/01-crawl4ai-vs-firecrawl.mp4) | [📝 Post FR/EN](videos/01-crawl4ai-vs-firecrawl-post.md) |
+| **⚔️ Duel 1 vs 1** | **LangGraph vs CrewAI** *(Agents IA)* | [▶ Voir la vidéo (22s)](videos/02-langgraph-vs-crewai.mp4) | [📝 Post FR/EN](videos/02-langgraph-vs-crewai-post.md) |
+| **⚔️ Duel 1 vs 1** | **vLLM vs Ollama** *(Inférence LLM)* | [▶ Voir la vidéo (22s)](videos/03-vllm-vs-ollama.mp4) | [📝 Post FR/EN](videos/03-vllm-vs-ollama-post.md) |
+| **⚔️ Duel 1 vs 1** | **Qdrant vs Chroma** *(Bases Vectorielles)* | [▶ Voir la vidéo (22s)](videos/04-qdrant-vs-chroma.mp4) | [📝 Post FR/EN](videos/04-qdrant-vs-chroma-post.md) |
+
+> Générez vos propres vidéos en 1 commande : `npm run video -- ownerA/repoA ownerB/repoB` ou `npm run tournament-video`
+
 ---
 
 ## Pourquoi RepoVerify / GitArena ?

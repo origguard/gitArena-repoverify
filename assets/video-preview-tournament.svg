@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#07090e"/>
+      <stop offset="50%" stop-color="#0c1220"/>
+      <stop offset="100%" stop-color="#07090d"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="40%" r="55%">
+      <stop offset="0%" stop-color="#00f3ff" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#00f3ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+
+  <!-- Cyber Grid -->
+  <g stroke="#00f3ff" stroke-opacity="0.06" stroke-width="1">
+    <line x1="0" y1="126" x2="1200" y2="126"/>
+    <line x1="0" y1="252" x2="1200" y2="252"/>
+    <line x1="0" y1="378" x2="1200" y2="378"/>
+    <line x1="0" y1="504" x2="1200" y2="504"/>
+    <line x1="240" y1="0" x2="240" y2="630"/>
+    <line x1="480" y1="0" x2="480" y2="630"/>
+    <line x1="720" y1="0" x2="720" y2="630"/>
+    <line x1="960" y1="0" x2="960" y2="630"/>
+  </g>
+
+  <!-- Outer Frame -->
+  <rect x="24" y="24" width="1152" height="582" rx="18" fill="none" stroke="#252b3d" stroke-width="2"/>
+
+  <!-- Top Pill -->
+  <rect x="64" y="56" width="380" height="38" rx="19" fill="#00ff88" fill-opacity="0.1" stroke="#00ff88" stroke-opacity="0.5"/>
+  <text x="254" y="81" text-anchor="middle" fill="#00ff88" font-family="Consolas, monospace" font-size="16" font-weight="bold">✓ REPOVERIFY • TOURNOI SURVIVAL</text>
+
+  <!-- Main Headline -->
+  <text x="64" y="152" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="44" font-weight="900">6 Frameworks IA passés au scanner</text>
+  <text x="64" y="196" fill="#94a3b8" font-family="Segoe UI, Arial, sans-serif" font-size="22">Licences BigCode • GitHub Actions CI • Bus Factor • Vulnérabilités OSV.dev</text>
+
+  <!-- Left Column: Mini Funnel Preview -->
+  <g font-family="Consolas, monospace" font-size="16">
+    <rect x="64" y="236" width="540" height="52" rx="10" fill="#111622" stroke="#00ff88" stroke-width="2"/>
+    <text x="84" y="268" fill="#ffffff" font-weight="bold">1. langchain-ai/langgraph</text>
+    <text x="584" y="268" text-anchor="end" fill="#00ff88" font-weight="bold">94.81/100 • MIT ✓</text>
+
+    <rect x="64" y="302" width="540" height="52" rx="10" fill="#111622" stroke="#00f3ff" stroke-width="2"/>
+    <text x="84" y="334" fill="#ffffff" font-weight="bold">2. unclecode/crawl4ai</text>
+    <text x="584" y="334" text-anchor="end" fill="#00f3ff" font-weight="bold">92.80/100 • Apache-2.0 ✓</text>
+
+    <rect x="64" y="368" width="540" height="52" rx="10" fill="#111622" stroke="#f59e0b" stroke-width="2"/>
+    <text x="84" y="400" fill="#ffffff" font-weight="bold">3. crewAIInc/crewAI</text>
+    <text x="584" y="400" text-anchor="end" fill="#f59e0b" font-weight="bold">92.13/100 • MIT ✓</text>
+
+    <rect x="64" y="434" width="540" height="52" rx="10" fill="#ff3366" fill-opacity="0.12" stroke="#ff3366" stroke-width="2"/>
+    <text x="84" y="466" fill="#cbd5e1">✗ mendableai/firecrawl</text>
+    <text x="584" y="466" text-anchor="end" fill="#ff3366" font-weight="bold">ÉLIMINÉ (AGPL-3.0)</text>
+  </g>
+
+  <!-- Right Column: Play Card -->
+  <rect x="650" y="236" width="486" height="250" rx="18" fill="#111622" stroke="#00f3ff" stroke-width="2.5"/>
+  <circle cx="893" cy="332" r="46" fill="#00ff88" fill-opacity="0.18" stroke="#00ff88" stroke-width="3"/>
+  <polygon points="880,310 880,354 918,332" fill="#00ff88"/>
+  <text x="893" y="416" text-anchor="middle" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="bold">REGARDER LA DÉMO MP4 (26s)</text>
+  <text x="893" y="448" text-anchor="middle" fill="#00f3ff" font-family="Consolas, monospace" font-size="15">Format 9:16 (1080×1920) + Audio AAC</text>
+
+  <!-- Footer -->
+  <rect x="64" y="520" width="1072" height="52" rx="10" fill="#0f172a" stroke="#252b3d"/>
+  <text x="88" y="552" fill="#00f3ff" font-family="Consolas, monospace" font-size="17" font-weight="bold">github.com/origguard/gitArena-repoverify</text>
+  <text x="1112" y="552" text-anchor="end" fill="#e2e8f0" font-family="Segoe UI, Arial, sans-serif" font-size="16">100% Node.js ESM • Zéro dépendance NPM</text>
+</svg>
