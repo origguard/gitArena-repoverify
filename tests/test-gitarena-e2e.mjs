@@ -28,7 +28,7 @@ import { badgeState, revokeKeyId } from '../src/engines/revocation.mjs';
 import { dedupe } from '../src/engines/corpus-audit.mjs';
 import { executionVerdict } from '../src/engines/recipes.mjs';
 import { evaluateGolden } from './golden-eval.mjs';
-import { extractDeps, computeCensus } from '../scripts/scan-corpus.mjs';
+import { extractDeps, computeCensus, evaluateIdentity } from '../scripts/scan-corpus.mjs';
 import { runPrGuard } from '../src/engines/pr-guard.mjs';
 import { issueOrgLicense, verifyOrgLicense } from '../src/engines/license-tier.mjs';
 import { createGitArenaServer } from '../src/server/server.mjs';
@@ -738,15 +738,32 @@ async function runE2eHarness() {
   console.log('  ✓ TEST-26 Validé : Merkle SHA-256, Révocation TTL, Golden Set & Dedupe conformes.');
   passedTests++;
 
-  // TEST-27 : Phase III — Indexeur 3 étages (extractDeps, scan_scope, computeCensus isolé)
-  console.log('[TEST-27] Vérification Phase III (Indexeur 3 étages, Enum scan_scope, Census)...');
-  const extracted = extractDeps({
-    'package.json': JSON.stringify({ dependencies: { express: '^4.18.2', bad: '*' } }),
+  // TEST-27 : Phase III — Lockfiles prioritaires, semver strict, identité, unattempted & Census
+  console.log('[TEST-27] Vérification Phase III (Lockfiles, Semver strict, Identité, Attrition & Census)...');
+  const extractedStrict = extractDeps({
+    'package.json': JSON.stringify({ dependencies: { ranged: '^4.18.2', exactpkg: '1.2.3', star: '*' } }),
+    'package-lock.json': JSON.stringify({ packages: { 'node_modules/locked-npm': { version: '2.4.1' } } }),
     'requirements.txt': 'fastapi==0.115.0\nrequests>=2.31.0\n',
-    'Cargo.toml': '[dependencies]\nserde = "1.0.210"\n',
+    'Cargo.toml': '[dependencies]\nranged_crate = "0.3"\nexact_crate = "1.0.210"\n',
+    'Cargo.lock': '[[package]]\nname = "futures"\nversion = "0.3.30"\n',
+    'uv.lock': '[[package]]\nname = "uvicorn"\nversion = "0.32.1"\n',
     'go.mod': 'require (\n\tgithub.com/gin-gonic/gin v1.10.0\n)\n'
   });
-  assert.equal(extracted.length, 4, 'Doit extraire uniquement les versions épinglées npm/PyPI/crates.io/Go');
+  assert.ok(extractedStrict.some(d => d.name === 'locked-npm' && d.source === 'package-lock.json'), 'Lockfile npm prioritaire sur package.json');
+  assert.equal(extractedStrict.some(d => d.name === 'ranged'), false, 'Plage ^4.18.2 rejetée');
+  assert.ok(extractedStrict.some(d => d.name === 'futures' && d.version === '0.3.30'), 'Cargo.lock extrait x.y.z exact');
+  assert.equal(extractedStrict.some(d => d.name === 'ranged_crate'), false, 'Plage Cargo 0.3 rejetée');
+  assert.ok(extractedStrict.some(d => d.name === 'uvicorn' && d.source === 'uv.lock'), 'uv.lock prioritaire PyPI');
+  assert.equal(extractedStrict.some(d => d.name === 'fastapi'), false, 'requirements.txt ignoré si uv.lock PyPI présent');
+  assert.ok(extractedStrict.some(d => d.name === 'github.com/gin-gonic/gin' && d.version === '1.10.0'), 'go.mod repli x.y.z');
+
+  const idFork = evaluateIdentity('evil/fork', { id: 999999, fork: true, parent: { full_name: 'org/orig' } }, 'evil/fork');
+  assert.equal(idFork.match, false);
+  assert.equal(idFork.status, 'FORK');
+  const idSquat = evaluateIdentity('qodo-ai/pr-agent', { id: 9999999, fork: false }, 'qodo-ai/pr-agent');
+  assert.equal(idSquat.match, false);
+  assert.equal(idSquat.status, 'NAMESAKE_OR_FORK');
+
   assert.equal(scanDirectoryBehavior(join(__dirname, '..', 'src')).scanMode, 'STATIC');
   assert.equal(scanDirectoryBehavior(join(__dirname, '..', 'src')).scanScope, 'local_clone_preflight');
 
@@ -754,26 +771,31 @@ async function runE2eHarness() {
   try {
     const idxDb = new DatabaseSync(join(tmpIdxDir, 'p3.sqlite'));
     idxDb.exec(readFileSync(join(__dirname, '../src/db/schema.sql'), 'utf8'));
-    idxDb.prepare('INSERT INTO corpus_inputs (input, added_at) VALUES (?, ?)').run('clean/pkg', '2026-11-17');
-    idxDb.prepare('INSERT INTO corpus_inputs (input, added_at) VALUES (?, ?)').run('nopins/pkg', '2026-11-17');
+    idxDb.prepare("INSERT INTO corpus_inputs (input, status, added_at) VALUES ('clean/pkg', 'resolved', '2026-11-17')").run();
+    idxDb.prepare("INSERT INTO corpus_inputs (input, status, added_at) VALUES ('nopins/pkg', 'resolved', '2026-11-17')").run();
+    idxDb.prepare("INSERT INTO corpus_inputs (input, status, added_at) VALUES ('ghost/pkg', 'ghost_404', '2026-11-17')").run();
+    idxDb.prepare("INSERT INTO corpus_inputs (input, status, added_at) VALUES ('todo/pkg', 'pending', '2026-11-17')").run();
     idxDb.prepare('INSERT INTO repos (id, owner, name, full_name, resolved_at) VALUES (?, ?, ?, ?, ?)').run(10, 'clean', 'pkg', 'clean/pkg', '2026-11-17');
     idxDb.prepare('INSERT INTO repos (id, owner, name, full_name, resolved_at) VALUES (?, ?, ?, ?, ?)').run(11, 'nopins', 'pkg', 'nopins/pkg', '2026-11-17');
-    idxDb.prepare("INSERT INTO behavioral_facts (owner, name, full_name, scan_mode, scan_scope, ref, findings_json, scanned_at, scanner_version) VALUES ('clean','pkg','clean/pkg','STATIC','tarball_manifests','behavioral_facts:1','[]','2026-11-17','v0.5')").run();
-    idxDb.prepare("INSERT INTO behavioral_facts (owner, name, full_name, scan_mode, scan_scope, ref, findings_json, scanned_at, scanner_version) VALUES ('nopins','pkg','nopins/pkg','STATIC','tarball_manifests','behavioral_facts:2','[]','2026-11-17','v0.5')").run();
+    idxDb.prepare("INSERT INTO behavioral_facts (owner, name, full_name, scan_mode, scan_scope, ref, findings_json, scanned_at, scanner_version) VALUES ('clean','pkg','clean/pkg','STATIC','raw_manifests','behavioral_facts:1','[]','2026-11-17','v0.6')").run();
+    idxDb.prepare("INSERT INTO behavioral_facts (owner, name, full_name, scan_mode, scan_scope, ref, findings_json, scanned_at, scanner_version) VALUES ('nopins','pkg','nopins/pkg','STATIC','no_manifest_found','behavioral_facts:2','[]','2026-11-17','v0.6')").run();
     idxDb.prepare("INSERT INTO osv_queries (owner, name, full_name, ecosystem, packages, vulns_json, queried_at, ref, status) VALUES ('clean','pkg','clean/pkg','npm',1,'[]','2026-11-17','osv:clean/pkg:1','queried')").run();
     idxDb.prepare("INSERT INTO osv_queries (owner, name, full_name, ecosystem, packages, vulns_json, queried_at, ref, status) VALUES ('nopins','pkg','nopins/pkg','none',0,'[]','2026-11-17','osv:nopins/pkg:none','no_pinned_deps')").run();
 
     const p3Census = computeCensus(idxDb);
-    assert.equal(p3Census.inputs, 2);
+    assert.equal(p3Census.inputs, 4);
+    assert.equal(p3Census.attempted, 3);
+    assert.equal(p3Census.unattempted, 1);
+    assert.equal(p3Census.ghosts, 1);
     assert.equal(p3Census.resolved, 2);
-    assert.equal(p3Census.staticScanned, 2);
-    assert.equal(p3Census.osvQueried, 1, 'no_pinned_deps ne compte pas comme osv_queried');
-    assert.equal(p3Census.verifiedWithEvidence, 1, 'Seul clean/pkg atteint niveau >= 3 sans findings ni CVEs');
+    assert.equal(p3Census.staticScanned, 1, 'no_manifest_found ne compte pas comme static_scanned');
+    assert.equal(p3Census.osvQueried, 1);
+    assert.equal(p3Census.verifiedWithEvidence, 1);
     idxDb.close();
   } finally {
     rmSync(tmpIdxDir, { recursive: true, force: true });
   }
-  console.log('  ✓ TEST-27 Validé : extractDeps, scan_scope, et computeCensus isolé conformes.');
+  console.log('  ✓ TEST-27 Validé : Lockfiles, Semver x.y.z, Identité, unattempted & Census conformes.');
   passedTests++;
 
   console.log('\n======================================================');

@@ -524,14 +524,19 @@ export function getHonestCensus() {
       SELECT
         (SELECT COUNT(*) FROM repositories) AS indexed,
         (SELECT COUNT(*) FROM corpus_inputs) AS inputs,
+        (SELECT COUNT(*) FROM corpus_inputs WHERE status != 'pending') AS attempted,
+        (SELECT COUNT(*) FROM corpus_inputs WHERE status = 'pending') AS unattempted,
+        (SELECT COUNT(*) FROM corpus_inputs WHERE status = 'ghost_404') AS ghosts,
+        (SELECT COUNT(*) FROM corpus_inputs WHERE status = 'duplicate') AS duplicates,
         (SELECT COUNT(*) FROM repos) AS resolved,
-        (SELECT COUNT(DISTINCT owner || '/' || name) FROM behavioral_facts WHERE scan_mode = 'STATIC') AS static_scanned,
+        (SELECT COUNT(DISTINCT owner || '/' || name) FROM behavioral_facts WHERE scan_mode = 'STATIC' AND COALESCE(scan_scope, '') != 'no_manifest_found') AS static_scanned,
         (SELECT COUNT(DISTINCT owner || '/' || name) FROM osv_queries WHERE status = 'queried') AS osv_queried,
         (SELECT COUNT(*) FROM (
           SELECT b.owner, b.name
           FROM behavioral_facts b
           JOIN osv_queries o ON o.owner = b.owner AND o.name = b.name
           WHERE b.scan_mode = 'STATIC'
+            AND COALESCE(b.scan_scope, '') != 'no_manifest_found'
             AND o.status = 'queried'
             AND json_array_length(b.findings_json) = 0
             AND json_array_length(o.vulns_json) = 0
@@ -540,16 +545,32 @@ export function getHonestCensus() {
         (SELECT COUNT(*) FROM integrity_signatures WHERE decision = 'ALLOW' AND evidence_level >= ?) AS signed_allow
     `).get(ALLOW_FLOOR);
 
-    const verified = Math.max(row.derived_verified || 0, row.signed_allow || 0);
+    const inputs = row.inputs || row.indexed || 0;
+    const attempted = row.attempted || 0;
+    const unattempted = row.inputs > 0 ? (row.unattempted || 0) : inputs;
+    const ghosts = row.ghosts || 0;
+    const resolved = row.resolved || 0;
+    const staticScanned = row.static_scanned || 0;
+    const osvQueried = row.osv_queried || 0;
+    const verifiedWithEvidence = Math.max(row.derived_verified || 0, row.signed_allow || 0);
+
     return {
       indexed: row.indexed || 0,
-      inputs: row.inputs || 0,
-      resolved: row.resolved || 0,
-      staticScanned: row.static_scanned || 0,
-      osvQueried: row.osv_queried || 0,
-      verifiedWithEvidence: verified
+      inputs,
+      attempted,
+      unattempted,
+      ghosts,
+      duplicates: row.duplicates || 0,
+      resolved,
+      staticScanned,
+      osvQueried,
+      verifiedWithEvidence,
+      chainSummary: `inputs=${inputs} attempted=${attempted} unattempted=${unattempted} ghosts=${ghosts} resolved=${resolved} static=${staticScanned} osv=${osvQueried} verified=${verifiedWithEvidence}`
     };
   } catch {
-    return { indexed: 0, inputs: 0, resolved: 0, staticScanned: 0, osvQueried: 0, verifiedWithEvidence: 0 };
+    return {
+      indexed: 0, inputs: 0, attempted: 0, unattempted: 0, ghosts: 0, duplicates: 0,
+      resolved: 0, staticScanned: 0, osvQueried: 0, verifiedWithEvidence: 0, chainSummary: ''
+    };
   }
 }

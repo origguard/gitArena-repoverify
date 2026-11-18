@@ -248,13 +248,17 @@ CREATE TABLE IF NOT EXISTS org_policies (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- 15. Phase III (§13) : Entrées du corpus à résoudre par l'indexeur
+-- 15. Phase III (§13) : Entrées du corpus à résoudre par l'indexeur (statut & attrition)
 CREATE TABLE IF NOT EXISTS corpus_inputs (
     input TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pending',
+    resolved_id INTEGER,
+    last_error TEXT,
+    attempted_at TEXT,
     added_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- 16. Phase III (§13) : Dépôts résolus canoniquement par ID numérique GitHub
+-- 16. Phase III (§13) : Dépôts résolus canoniquement par ID numérique GitHub + identité
 CREATE TABLE IF NOT EXISTS repos (
     id INTEGER PRIMARY KEY,
     owner TEXT NOT NULL,
@@ -267,16 +271,18 @@ CREATE TABLE IF NOT EXISTS repos (
     language TEXT,
     license TEXT,
     pushed_at TEXT,
+    identity_json TEXT,
     resolved_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_repos_canon_full ON repos(full_name);
 
--- 17. Phase III (§14) : Cache de manifestes bruts lus lors du scan (permet --stage=osv séparé)
+-- 17. Phase III (§14) : Cache de manifestes & sonde manifest_probe
 CREATE TABLE IF NOT EXISTS manifest_cache (
     full_name TEXT PRIMARY KEY,
     blobs_json TEXT NOT NULL,
     scope TEXT NOT NULL,
+    manifest_probe_json TEXT,
     cached_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

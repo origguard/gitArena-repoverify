@@ -297,15 +297,19 @@ export function getStats(req, res) {
     totalRepositories: totalRepos,
     indexedCount: census.indexed,
     inputsCount: census.inputs,
+    attemptedCount: census.attempted,
+    unattemptedCount: census.unattempted,
+    ghostsCount: census.ghosts,
     resolvedCount: census.resolved,
     staticScannedCount: census.staticScanned,
     osvQueriedCount: census.osvQueried,
     verifiedWithEvidenceCount: census.verifiedWithEvidence,
+    chainSummary: census.chainSummary,
     totalDuelsPlayed: duelsCount,
     totalHarnessRuns: harnessCount,
     commercialSafePercentage: Math.round((permissiveCount / (totalRepos || 1)) * 100),
     averageAiScore: Math.round((avgScoreRow.avgScore || 0) * 10) / 10,
-    inspectorEngine: 'RepoVerify / G0D-PRÆTOR Engine v3.3 (Fail-Closed)',
+    inspectorEngine: 'RepoVerify / G0D-PRÆTOR Engine v3.4 (Fail-Closed)',
     status: 'SYSTEM_OPERATIONAL'
   });
 }

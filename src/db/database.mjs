@@ -64,6 +64,41 @@ export function initDatabase(dbPath = null) {
     db.exec('ALTER TABLE behavioral_facts ADD COLUMN ref TEXT;');
   }
 
+  // Migrations idempotentes §13-§14 : corpus_inputs.status, repos.identity_json, manifest_cache.manifest_probe_json
+  const inputCols = db.prepare('PRAGMA table_info(corpus_inputs)').all().map(c => c.name);
+  if (!inputCols.includes('status')) {
+    db.exec("ALTER TABLE corpus_inputs ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';");
+  }
+  if (!inputCols.includes('resolved_id')) {
+    db.exec('ALTER TABLE corpus_inputs ADD COLUMN resolved_id INTEGER;');
+  }
+  if (!inputCols.includes('last_error')) {
+    db.exec('ALTER TABLE corpus_inputs ADD COLUMN last_error TEXT;');
+  }
+  if (!inputCols.includes('attempted_at')) {
+    db.exec('ALTER TABLE corpus_inputs ADD COLUMN attempted_at TEXT;');
+  }
+
+  const repoCols = db.prepare('PRAGMA table_info(repos)').all().map(c => c.name);
+  if (!repoCols.includes('identity_json')) {
+    db.exec('ALTER TABLE repos ADD COLUMN identity_json TEXT;');
+  }
+
+  const manifestCols = db.prepare('PRAGMA table_info(manifest_cache)').all().map(c => c.name);
+  if (!manifestCols.includes('manifest_probe_json')) {
+    db.exec('ALTER TABLE manifest_cache ADD COLUMN manifest_probe_json TEXT;');
+  }
+
+  // Réconciliation initiale si repos existaient déjà avant ajout de status sur corpus_inputs
+  db.exec(`
+    UPDATE corpus_inputs
+       SET status = 'resolved',
+           resolved_id = (SELECT r.id FROM repos r WHERE LOWER(r.full_name) = LOWER(corpus_inputs.input)),
+           attempted_at = COALESCE(attempted_at, datetime('now'))
+     WHERE status = 'pending'
+       AND EXISTS (SELECT 1 FROM repos r WHERE LOWER(r.full_name) = LOWER(corpus_inputs.input));
+  `);
+
   instance = db;
   return db;
 }

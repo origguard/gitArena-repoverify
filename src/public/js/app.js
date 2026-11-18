@@ -59,7 +59,10 @@ async function loadStats() {
     const res = await fetch('/api/stats');
     if (!res.ok) return;
     const data = await res.json();
-    document.getElementById('kpiTotal').textContent = data.totalRepositories || 0;
+    const verified = Number(data.verifiedWithEvidenceCount || 0);
+    const resolved = Number(data.resolvedCount || 0);
+    const unattempted = Number(data.unattemptedCount ?? (data.totalRepositories || 0));
+    document.getElementById('kpiTotal').textContent = `${verified} / ${resolved} (reste ${unattempted})`;
     document.getElementById('kpiDuels').textContent = data.totalDuelsPlayed || 0;
     document.getElementById('kpiLegal').textContent = `${data.commercialSafePercentage || 0}%`;
   } catch (err) {
@@ -1213,7 +1216,7 @@ async function loadTrustHub() {
         const census = regData.census || {};
         metaEl.innerHTML = `
           <div><strong>Algorithme :</strong> ${escapeHtml(regData.publicKey.algorithm)} • <strong>keyid :</strong> ${escapeHtml(regData.publicKey.keyid || '—')} • <strong>Custody :</strong> ${escapeHtml(regData.publicKey.custody || 'external')}</div>
-          <div style="margin-top:0.35rem;"><strong>Recensement :</strong> ${Number(census.indexed || 0)} indexés • ${Number(census.staticScanned || 0)} analysés statiquement • ${Number(census.verifiedWithEvidence || 0)} vérifiés (ALLOW preuve ≥ 3)</div>
+          <div style="margin-top:0.35rem;"><strong>Chaîne Corpus :</strong> inputs=${Number(census.inputs || 0)} • attempted=${Number(census.attempted || 0)} • unattempted=${Number(census.unattempted || 0)} • ghosts=${Number(census.ghosts || 0)} • resolved=${Number(census.resolved || 0)} • static=${Number(census.staticScanned || 0)} • osv=${Number(census.osvQueried || 0)} • <strong>verified_with_evidence=${Number(census.verifiedWithEvidence || 0)}</strong></div>
           <div style="margin-top:0.35rem;"><strong>Palier Open-Core Actif :</strong> ${escapeHtml(licData.activeTier || 'community')} (Org: ${escapeHtml(licData.orgId || 'local-community')})</div>
         `;
       }
