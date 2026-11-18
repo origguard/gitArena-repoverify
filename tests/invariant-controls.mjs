@@ -43,6 +43,12 @@ const visibleAdvisories = await tryImport(
   ['../src/engines/completeness.mjs'], m => m.visibleAdvisories);
 const identityVerdict = await tryImport(
   ['../src/engines/identity-anchor.mjs'], m => m.identityVerdict);
+const decompose = await tryImport(
+  ['../src/engines/completeness.mjs'], m => m.decomposeReasons);
+const checkBand = await tryImport(
+  ['../src/engines/completeness.mjs'], m => m.checkBand);
+const blockCause = await tryImport(
+  ['../src/engines/probe-depth.mjs'], m => m.blockCause);
 
 const db = initDatabase();
 
@@ -262,6 +268,57 @@ const CONTROLS = [
       const probe = fn => fn({ url: null }, { slug: 'a/b', id: 1 }).status === 'UNANCHORED';
       const mutant = () => ({ status: 'CANONICAL_MATCH', match: true });
       return verdict(probe(identityVerdict), probe(mutant));
+    } },
+  { id: 'C-17', inv: 'I7 · somme raisons', defect: 'décomposition qui ne somme pas',
+    run: () => {
+      if (!decompose) return 'NON_INSTRUMENTÉ';
+      const rows = [
+        ...Array.from({ length: 5 }, (_, i) => ({ findings: 1, vulns: 0, id: i })),
+        ...Array.from({ length: 8 }, (_, i) => ({ findings: 0, vulns: 1, id: i + 10 })),
+        ...Array.from({ length: 6 }, (_, i) => ({ findings: 2, vulns: 3, id: i + 20 })),
+        { findings: 0, vulns: 0, id: 99 },
+      ];
+      const probe = d => {
+        const r = d(rows);
+        return (r.blockedFindingsOnly + r.blockedAdvisoriesOnly + r.blockedBoth + r.verifiedAsResolved) === rows.length && r.exactSum === true;
+      };
+      const mutant = () => ({ blockedFindingsOnly: 1, blockedAdvisoriesOnly: 1, blockedBoth: 1, verifiedAsResolved: 1, exactSum: false });
+      return verdict(probe(decompose), probe(mutant));
+    } },
+  { id: 'C-18', inv: 'I7 · zéro chute', defect: 'un dépôt sans raison comptée',
+    run: () => {
+      if (!decompose) return 'NON_INSTRUMENTÉ';
+      const clean20 = Array.from({ length: 20 }, (_, i) => ({ findings: 0, vulns: 0, id: i }));
+      const probe = d => d(clean20).verifiedAsResolved === 20;
+      const mutant = () => ({ blockedFindingsOnly: 0, blockedAdvisoriesOnly: 0, blockedBoth: 0, verifiedAsResolved: 0 });
+      return verdict(probe(decompose), probe(mutant));
+    } },
+  { id: 'C-19', inv: 'I8 · bande sanity', defect: 'run accepté hors bande',
+    run: () => {
+      if (!checkBand) return 'NON_INSTRUMENTÉ';
+      const probe = c => c(120, { lo: 5, hi: 40 }).within === false;
+      const mutant = () => ({ within: true });
+      return verdict(probe(checkBand), probe(mutant));
+    } },
+  { id: 'C-20', inv: 'origine cause', defect: 'cause probe publiée comme propriété du dépôt',
+    run: () => {
+      if (!blockCause) return 'NON_INSTRUMENTÉ';
+      const located = {
+        consulted: true,
+        truncated: false,
+        locks: [{ path: 'pnpm-lock.yaml', size: 3984588, depth: 0 }],
+        pinned: [],
+      };
+      const probe = f => f({
+        located,
+        read: [],
+        skipped: [{ path: 'pnpm-lock.yaml', size: 3984588, reason: 'over_cap' }],
+        capBytes: 2097152,
+        pinnedAccepted: false,
+        ecoAllowed: ['pnpm-lock.yaml'],
+      }).origin === 'probe';
+      const mutant = () => ({ cause: 'NO_LOCKFILE', origin: 'repo', cap: 'WARN' });
+      return verdict(probe(blockCause), probe(mutant));
     } },
 ];
 
