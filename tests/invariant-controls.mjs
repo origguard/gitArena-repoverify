@@ -53,6 +53,16 @@ const auditGateInputs = await tryImport(
   ['../src/engines/evidence.mjs'], m => m.auditGateInputs);
 const extractDepsWithCoverage = await tryImport(
   ['../scripts/scan-corpus.mjs'], m => m.extractDepsWithCoverage);
+const readLockfile = await tryImport(
+  ['../final-correction.mjs'], m => m.readLockfile);
+const reconcileDenominator = await tryImport(
+  ['../final-correction.mjs', '../src/engines/completeness.mjs'], m => m.reconcileDenominator);
+const testPep440 = await tryImport(
+  ['../final-correction.mjs'], m => (m.PEP440 ? v => m.PEP440.test(v) : null));
+const testSemver = await tryImport(
+  ['../final-correction.mjs'], m => (m.SEMVER ? v => m.SEMVER.test(v) : null));
+const applyCapFn = await tryImport(
+  ['../final-correction.mjs', '../src/engines/completeness.mjs'], m => m.applyCap);
 
 const db = initDatabase();
 
@@ -393,6 +403,52 @@ const CONTROLS = [
       };
       const mutant = () => ({ deps: [{ name: 'pr-agent' }, { name: 'a2a-sdk', version: '1.3.0' }], depsResolved: 2 });
       return verdict(probe(extractDepsWithCoverage), probe(mutant));
+    } },
+  { id: 'C-26', inv: 'I10 · dénominateur', defect: 'porte qui accepte tout dénominateur non réconcilié',
+    run: () => {
+      if (!reconcileDenominator || !readLockfile) return 'NON_INSTRUMENTÉ';
+      const uv = '[[package]]\nname = "a"\nversion = "1.0.0"\nsource = { registry = "https://pypi.org/simple" }\n';
+      const reading = readLockfile('uv.lock', uv);
+      const broken = { ...reading, expected: 181, accepted: 167, dropped: [{ name: 'idna', version: '3.18', reason: 'version_pattern_rejected' }] };
+      const probe = f => f(broken).gate === 'DENOMINATOR_UNRECONCILED';
+      const mutant = () => ({ gate: 'RECONCILED', cap: null });
+      return verdict(probe(reconcileDenominator), probe(mutant));
+    } },
+  { id: 'C-27', inv: 'I10 · PEP 440', defect: 'semver universel appliqué à PyPI',
+    run: () => {
+      if (!testPep440 || !testSemver) return 'NON_INSTRUMENTÉ';
+      const samples = ['3.18', '26.3', '312', '2026.2', '2.9.0.post0', '7.1.0b4', '1!2.0', '1.0+ubuntu.1'];
+      const probe = fn => samples.every(v => fn(v));
+      return verdict(probe(testPep440), probe(testSemver));
+    } },
+  { id: 'C-28', inv: 'I10 · sources loc.', defect: 'sources locales non soustraites du dénominateur',
+    run: () => {
+      if (!readLockfile) return 'NON_INSTRUMENTÉ';
+      const uv = [
+        '[[package]]', 'name = "pr-agent"', 'version = "0.49.0"', 'source = { editable = "." }',
+        '[[package]]', 'name = "idna"', 'version = "3.18"', 'source = { registry = "https://pypi.org/simple" }',
+      ].join('\n');
+      const r = readLockfile('uv.lock', uv);
+      const clean = r.raw === 2 && r.locals === 1 && r.expected === 1;
+      const noSubtract = r.raw === r.expected;
+      return verdict(clean, noSubtract);
+    } },
+  { id: 'C-29', inv: 'I10 · format illis.', defect: 'format binaire ou corrompu traité comme zéro dépendance',
+    run: () => {
+      if (!readLockfile) return 'NON_INSTRUMENTÉ';
+      const probe = f => {
+        const r = f('bun.lockb', '\x00');
+        return r.parseable === false && r.expected === null;
+      };
+      const mutant = () => ({ parseable: true, expected: 0, accepted: 0, dropped: [] });
+      return verdict(probe(readLockfile), probe(mutant));
+    } },
+  { id: 'C-30', inv: 'I10 · plafond', defect: 'plafond de réconciliation ignoré dans le verdict final',
+    run: () => {
+      if (!reconcileDenominator || !applyCapFn) return 'NON_INSTRUMENTÉ';
+      const probe = f => f('ALLOW', 'INDETERMINATE') === 'INDETERMINATE' && f('ALLOW', null) === 'ALLOW';
+      const mutant = base => base;
+      return verdict(probe(applyCapFn), probe(mutant));
     } },
 ];
 
