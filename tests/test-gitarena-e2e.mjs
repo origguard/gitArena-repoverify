@@ -29,8 +29,9 @@ import { dedupe } from '../src/engines/corpus-audit.mjs';
 import { executionVerdict } from '../src/engines/recipes.mjs';
 import { evaluateGolden } from './golden-eval.mjs';
 import { extractDeps, computeCensus, evaluateIdentity } from '../scripts/scan-corpus.mjs';
-import { assessCoverage, gateCompleteness, applyCap, visibleAdvisories, assessRepo } from '../src/engines/completeness.mjs';
-import { cleanGitUrl, expectedUpstream, identityVerdict } from '../src/engines/identity-anchor.mjs';
+import { assessCoverage, gateCompleteness, applyCap, visibleAdvisories, assessRepo, decomposeReasons, checkBand } from '../src/engines/completeness.mjs';
+import { cleanGitUrl, expectedUpstream, identityVerdict, buildIdentityScope } from '../src/engines/identity-anchor.mjs';
+import { locateLockfiles, readLocks, blockCause, scopeStatement, ECO_LOCKS } from '../src/engines/probe-depth.mjs';
 import { runPrGuard } from '../src/engines/pr-guard.mjs';
 import { issueOrgLicense, verifyOrgLicense } from '../src/engines/license-tier.mjs';
 import { createGitArenaServer } from '../src/server/server.mjs';
@@ -46,7 +47,7 @@ async function runE2eHarness() {
   console.log('======================================================\n');
 
   let passedTests = 0;
-  const totalTests = 28;
+  const totalTests = 29;
 
   // TEST-01 : Schéma & Persistance SQLite WAL
   console.log('[TEST-01] Vérification du Schéma & Mode WAL SQLite...');
@@ -62,11 +63,11 @@ async function runE2eHarness() {
     'behavioral_audits', 'behavioral_facts', 'integrity_signatures', 'revoked_keys',
     'execution_benchmarks', 'org_policies',
     'corpus_inputs', 'repos', 'manifest_cache', 'osv_queries', 'scan_runs',
-    'cohort_members', 'stage_attrition'
+    'cohort_members', 'stage_attrition', 'probe_outcomes'
   ]) {
     assert.ok(tables.includes(requiredTable), `Table ${requiredTable} absente`);
   }
-  console.log('  ✓ TEST-01 Validé : SQLite WAL et 23 tables opérationnels.');
+  console.log('  ✓ TEST-01 Validé : SQLite WAL et 24 tables opérationnels.');
   passedTests++;
 
   // TEST-02 : Ingestion & Seeding Réel
@@ -552,6 +553,7 @@ async function runE2eHarness() {
     'src/engines/evidence.mjs',
     'src/engines/completeness.mjs',
     'src/engines/identity-anchor.mjs',
+    'src/engines/probe-depth.mjs',
     'src/engines/ai-scoring-engine.mjs',
     'src/engines/elo-engine.mjs',
     'src/engines/harness-runner.mjs',
@@ -872,6 +874,83 @@ async function runE2eHarness() {
     rmSync(tmpP4Dir, { recursive: true, force: true });
   }
   console.log('  ✓ TEST-28 Validé : I6 complétude, visibilité OSV, ancre registres, homonymes & cohortes conformes.');
+  passedTests++;
+
+  // TEST-29 : Phase V — Profondeur de sonde, I7 somme exacte, Tiers identité, portée déclarative & I8 bande
+  console.log('[TEST-29] Vérification Phase V (Probe Depth, I7 Waterfall, Tiers, Scope & I8 Bande)...');
+  const locMock = await locateLockfiles('org', 'mono', 'main', async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      truncated: false,
+      tree: [
+        { type: 'blob', path: 'package.json', size: 800 },
+        { type: 'blob', path: 'pnpm-lock.yaml', size: 2240125 },
+        { type: 'blob', path: 'web/uv.lock', size: 120000 }
+      ]
+    })
+  }));
+  assert.equal(locMock.consulted, true);
+  assert.equal(locMock.locks.length, 2);
+  assert.equal(locMock.locks[0].path, 'pnpm-lock.yaml');
+
+  const bcOver = blockCause({
+    located: locMock,
+    read: [],
+    skipped: [{ path: 'pnpm-lock.yaml', size: 2240125, reason: 'over_cap' }],
+    capBytes: 2_000_000,
+  });
+  assert.equal(bcOver.cause, 'LOCKFILE_OVER_CAP');
+  assert.equal(bcOver.origin, 'probe');
+  assert.equal(bcOver.cap, 'INDETERMINATE');
+  assert.ok(scopeStatement(bcOver).includes('LOCKFILE_OVER_CAP'));
+
+  const bcEco = blockCause({
+    located: { consulted: true, truncated: false, locks: [{ path: 'poetry.lock', size: 412000, depth: 0 }], pinned: [] },
+    read: [],
+    ecoAllowed: ECO_LOCKS.npm,
+  });
+  assert.equal(bcEco.cause, 'ECO_LOCK_MISMATCH');
+  assert.equal(bcEco.origin, 'probe');
+
+  const bcTrunc = blockCause({ located: { consulted: true, truncated: true, locks: [], pinned: [] } });
+  assert.equal(bcTrunc.cause, 'TREE_TRUNCATED');
+  assert.equal(bcTrunc.origin, 'probe');
+
+  const bcRepo = blockCause({ located: { consulted: true, truncated: false, locks: [], pinned: [{ path: 'requirements.txt', size: 300 }] }, pinnedAccepted: false });
+  assert.equal(bcRepo.cause, 'NO_LOCKFILE');
+  assert.equal(bcRepo.origin, 'repo');
+
+  const readUnderCap = await readLocks('org', 'mono', 'main', [{ path: 'pnpm-lock.yaml', size: 2240125 }], 2_000_000, async () => { throw new Error('should not fetch over_cap'); });
+  assert.equal(readUnderCap.read.length, 0);
+  assert.equal(readUnderCap.skipped[0].reason, 'over_cap');
+
+  const idScope = buildIdentityScope({ status: 'CANONICAL_MATCH' }, { source: 'pypi.org', url: 'https://github.com/the-pr-agent/pr-agent' });
+  assert.equal(idScope.anchor_declarative, true);
+  assert.ok(idScope.does_not_attest.some(x => x.includes('squat')));
+
+  assert.equal(checkBand(14, { lo: 5, hi: 40 }).within, true);
+  assert.equal(checkBand(14, { lo: 5, hi: 40 }).action, 'publish');
+  assert.equal(checkBand(120, { lo: 5, hi: 40 }).within, false);
+  assert.equal(checkBand(120, { lo: 5, hi: 40 }).action, 'HOLD_suspect_gate');
+
+  const wfCheck = decomposeReasons([
+    { findings: 0, vulns: 13 },
+    { findings: 1, vulns: 2 },
+    { findings: 1, vulns: 0 },
+    { findings: 0, vulns: 0 },
+  ]);
+  assert.equal(wfCheck.exactSum, true);
+  assert.equal(wfCheck.passCoverage, 4);
+  assert.equal(wfCheck.verifiedAsResolved, 1);
+
+  const dbV5 = initDatabase();
+  const realCensus = computeCensus(dbV5);
+  assert.equal(realCensus.passBreakdown.exactSum, true, 'Invariant I7 doit être exact sur la vraie base SQLite');
+  assert.ok(realCensus.verifiedAsNamed <= realCensus.verifiedAsResolved, 'Tier B (named) <= Tier A (resolved)');
+  closeDatabase();
+
+  console.log(`  ✓ TEST-29 Validé : Probe Depth, I7 exact (${realCensus.passBreakdown.blockedFindingsOnly}+${realCensus.passBreakdown.blockedAdvisoriesOnly}+${realCensus.passBreakdown.blockedBoth}+${realCensus.passBreakdown.verifiedAsResolved}=${realCensus.passBreakdown.passCoverage}), Tiers A=${realCensus.verifiedAsResolved}/B=${realCensus.verifiedAsNamed}, Scope & I8 conformes.`);
   passedTests++;
 
   console.log('\n======================================================');

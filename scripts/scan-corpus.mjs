@@ -10,10 +10,17 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { initDatabase, closeDatabase } from '../src/db/database.mjs';
 import { scanBlobsBehavior } from '../src/engines/behavioral-firewall.mjs';
-import { assessRepo, visibleAdvisories } from '../src/engines/completeness.mjs';
-import { expectedUpstream, identityVerdict } from '../src/engines/identity-anchor.mjs';
+import { assessRepo, visibleAdvisories, decomposeReasons, checkBand } from '../src/engines/completeness.mjs';
+import { expectedUpstream, identityVerdict, buildIdentityScope } from '../src/engines/identity-anchor.mjs';
+import {
+  DEFAULT_LOCK_CAP_BYTES,
+  locateLockfiles,
+  readLocks,
+  blockCause,
+  scopeStatement
+} from '../src/engines/probe-depth.mjs';
 
-const SCANNER_VERSION = 'scanner_v0.7';
+const SCANNER_VERSION = 'scanner_v0.8';
 
 export const MANIFESTS = [
   'package.json', 'pyproject.toml', 'requirements.txt',
@@ -57,7 +64,7 @@ const sleep = ms => (ms > 0 ? new Promise(r => setTimeout(r, ms)) : Promise.reso
 
 async function fetchGitHub(url, headers, apiCounter) {
   apiCounter.calls++;
-  const res = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(30000) });
   if (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0') {
     const resetSec = Number(res.headers.get('x-ratelimit-reset') || 0);
     const waitMs = Math.min(60000, Math.max(1000, resetSec * 1000 - Date.now()));
@@ -412,6 +419,78 @@ export function computeCensus(db, cohortId = null) {
           (SELECT COUNT(*) FROM stage_attrition) AS attrition_events
       `).get();
 
+  const passRows = cohortId
+    ? db.prepare(`
+        WITH latest_b AS (
+          SELECT owner, name, full_name, findings_json,
+                 ROW_NUMBER() OVER (PARTITION BY owner, name ORDER BY scanned_at DESC, id DESC) AS rn
+          FROM behavioral_facts
+          WHERE scan_mode = 'STATIC' AND COALESCE(scan_scope, '') != 'no_manifest_found'
+        ),
+        latest_o AS (
+          SELECT owner, name, full_name, vulns_json, status, coverage_gate,
+                 ROW_NUMBER() OVER (PARTITION BY owner, name ORDER BY queried_at DESC, id DESC) AS rn
+          FROM osv_queries
+        )
+        SELECT json_array_length(b.findings_json) AS findings,
+               json_array_length(o.vulns_json) AS vulns,
+               (SELECT COUNT(*) FROM json_each(o.vulns_json)
+                WHERE LOWER(COALESCE(json_extract(value, '$.severity'), '')) IN ('critical', 'high')) AS critical,
+               json_extract(r.identity_json, '$.status') AS id_status,
+               json_extract(r.identity_json, '$.anchor.url') AS anchor_url
+        FROM cohort_members cm
+        JOIN repos r ON r.id = cm.repo_id
+        JOIN latest_b b ON b.owner = r.owner AND b.name = r.name AND b.rn = 1
+        JOIN latest_o o ON o.owner = r.owner AND o.name = r.name AND o.rn = 1
+        WHERE cm.cohort_id = ?
+          AND o.status = 'queried'
+          AND COALESCE(o.coverage_gate, '') = 'PASS'
+      `).all(cohortId)
+    : db.prepare(`
+        WITH latest_b AS (
+          SELECT owner, name, full_name, findings_json,
+                 ROW_NUMBER() OVER (PARTITION BY owner, name ORDER BY scanned_at DESC, id DESC) AS rn
+          FROM behavioral_facts
+          WHERE scan_mode = 'STATIC' AND COALESCE(scan_scope, '') != 'no_manifest_found'
+        ),
+        latest_o AS (
+          SELECT owner, name, full_name, vulns_json, status, coverage_gate,
+                 ROW_NUMBER() OVER (PARTITION BY owner, name ORDER BY queried_at DESC, id DESC) AS rn
+          FROM osv_queries
+        )
+        SELECT json_array_length(b.findings_json) AS findings,
+               json_array_length(o.vulns_json) AS vulns,
+               (SELECT COUNT(*) FROM json_each(o.vulns_json)
+                WHERE LOWER(COALESCE(json_extract(value, '$.severity'), '')) IN ('critical', 'high')) AS critical,
+               json_extract(r.identity_json, '$.status') AS id_status,
+               json_extract(r.identity_json, '$.anchor.url') AS anchor_url
+        FROM latest_b b
+        JOIN latest_o o ON o.owner = b.owner AND o.name = b.name AND o.rn = 1
+        LEFT JOIN repos r ON r.owner = b.owner AND r.name = b.name
+        WHERE b.rn = 1 AND o.status = 'queried' AND COALESCE(o.coverage_gate, '') = 'PASS'
+      `).all();
+
+  const passBreakdown = decomposeReasons(passRows);
+  const verifiedAsResolved = passBreakdown.verifiedAsResolved;
+  const verifiedAsNamed = passRows.filter(p =>
+    Number(p.findings || 0) === 0 &&
+    Number(p.vulns || 0) === 0 &&
+    (p.id_status === 'CANONICAL_MATCH' || p.id_status === 'REDIRECTED') &&
+    Boolean(p.anchor_url)
+  ).length;
+
+  const probeStats = db.prepare(`
+    WITH latest_p AS (
+      SELECT full_name, cause, origin, gate,
+             ROW_NUMBER() OVER (PARTITION BY full_name ORDER BY probed_at DESC, id DESC) AS rn
+      FROM probe_outcomes
+    )
+    SELECT origin, cause, COUNT(*) AS cnt
+    FROM latest_p
+    WHERE rn = 1
+    GROUP BY origin, cause
+  `).all();
+
   const inputs = row.inputs || (cohortId ? 0 : row.indexed) || 0;
   const attempted = row.attempted || 0;
   const unattempted = row.inputs > 0 ? (row.unattempted || 0) : inputs;
@@ -421,7 +500,7 @@ export function computeCensus(db, cohortId = null) {
   const staticScanned = row.static_scanned || 0;
   const osvQueried = row.osv_queried || 0;
   const coveragePass = row.coverage_pass || 0;
-  const verifiedWithEvidence = row.verified_with_evidence || 0;
+  const verifiedWithEvidence = verifiedAsResolved;
 
   return {
     cohortId: cohortId || null,
@@ -436,8 +515,12 @@ export function computeCensus(db, cohortId = null) {
     osvQueried,
     coveragePass,
     verifiedWithEvidence,
+    verifiedAsResolved,
+    verifiedAsNamed,
+    passBreakdown,
+    probeOutcomes: probeStats,
     attritionEvents: row.attrition_events || 0,
-    chainSummary: `inputs=${inputs} attempted=${attempted} unattempted=${unattempted} ghosts=${ghosts} resolved=${resolved} static=${staticScanned} osv=${osvQueried} pass=${coveragePass} verified=${verifiedWithEvidence}`
+    chainSummary: `inputs=${inputs} attempted=${attempted} unattempted=${unattempted} ghosts=${ghosts} resolved=${resolved} static=${staticScanned} osv=${osvQueried} pass=${coveragePass} verified=${verifiedAsResolved} (named=${verifiedAsNamed})`
   };
 }
 
@@ -609,7 +692,7 @@ export function extractTarballManifestsFromBuffer(gzipBuffer) {
     if (typeFlag === '0' || typeFlag === '\0' || typeFlag === '') {
       const slashIdx = fullPath.indexOf('/');
       const relPath = slashIdx >= 0 ? fullPath.slice(slashIdx + 1) : fullPath;
-      const maxSize = LOCKFILES_SET.has(relPath) ? 2_000_000 : 200_000;
+      const maxSize = LOCKFILES_SET.has(relPath) ? DEFAULT_LOCK_CAP_BYTES : 200_000;
       if (size > 0 && size < maxSize && TARGET_FILES_SET.has(relPath)) {
         blobs[relPath] = tarBuf.subarray(dataStart, dataEnd).toString('utf8');
       }
@@ -638,25 +721,33 @@ async function scanTarball(owner, name, branch) {
 
 async function scanRaw(owner, name, branch) {
   const blobs = {};
+  const skipped = [];
   await Promise.all(ALL_TARGETS.map(async rel => {
     const url = `https://raw.githubusercontent.com/${owner}/${name}/${branch}/${rel}`;
     try {
-      const res = await fetch(url, { headers: { 'User-Agent': 'repoverify-indexer' }, signal: AbortSignal.timeout(10000) });
+      const res = await fetch(url, { headers: { 'User-Agent': 'repoverify-indexer' }, signal: AbortSignal.timeout(12000) });
       if (res.ok) {
         const text = await res.text();
-        const maxSize = LOCKFILES_SET.has(rel) ? 2_000_000 : 200_000;
-        if (text.length < maxSize) blobs[rel] = text;
+        const maxSize = LOCKFILES_SET.has(rel) ? DEFAULT_LOCK_CAP_BYTES : 200_000;
+        const sizeBytes = Buffer.byteLength(text, 'utf8');
+        if (sizeBytes <= maxSize) {
+          blobs[rel] = text;
+        } else {
+          skipped.push({ path: rel, size: sizeBytes, reason: 'over_cap' });
+        }
       }
     } catch { /* ignore individual missing file */ }
   }));
   const found = Object.keys(blobs);
   return {
     blobs,
+    skipped,
     truncated: false,
     scope: found.length === 0 ? 'no_manifest_found' : 'raw_manifests',
     manifestProbe: {
       probed: ALL_TARGETS,
       found,
+      skipped,
       missing: ALL_TARGETS.length - found.length,
       tree_consulted: false
     }
@@ -693,18 +784,24 @@ async function scanBlobs(owner, name, branch, headers, apiCounter) {
   };
 }
 
-export async function scanStage(db, { limit = 500, fetchMode = 'raw', delayMs = 120, dryRun = false, force = false, cohortId = null, headers, failures, apiCounter, blobCache }) {
-  const repos = force
-    ? db.prepare('SELECT id, owner, name, full_name, default_branch FROM repos LIMIT ?').all(limit)
-    : db.prepare(`
-        SELECT r.id, r.owner, r.name, r.full_name, r.default_branch
-        FROM repos r
-        WHERE NOT EXISTS (
-          SELECT 1 FROM behavioral_facts b
-          WHERE b.owner = r.owner AND b.name = r.name AND b.scan_mode = 'STATIC'
-        )
-        LIMIT ?
-      `).all(limit);
+export async function scanStage(db, { limit = 500, fetchMode = 'raw', delayMs = 120, dryRun = false, force = false, cohortId = null, repoFilter = null, headers, failures, apiCounter, blobCache }) {
+  let repos;
+  if (repoFilter && repoFilter.length > 0) {
+    const ph = repoFilter.map(() => '?').join(',');
+    repos = db.prepare(`SELECT id, owner, name, full_name, default_branch FROM repos WHERE full_name IN (${ph})`).all(...repoFilter);
+  } else if (force) {
+    repos = db.prepare('SELECT id, owner, name, full_name, default_branch FROM repos LIMIT ?').all(limit);
+  } else {
+    repos = db.prepare(`
+      SELECT r.id, r.owner, r.name, r.full_name, r.default_branch
+      FROM repos r
+      WHERE NOT EXISTS (
+        SELECT 1 FROM behavioral_facts b
+        WHERE b.owner = r.owner AND b.name = r.name AND b.scan_mode = 'STATIC'
+      )
+      LIMIT ?
+    `).all(limit);
+  }
 
   let scanned = 0;
 
@@ -723,20 +820,86 @@ export async function scanStage(db, { limit = 500, fetchMode = 'raw', delayMs = 
       manifest_probe_json = excluded.manifest_probe_json,
       cached_at = excluded.cached_at
   `);
+  const insertProbeOutcome = db.prepare(`
+    INSERT INTO probe_outcomes (
+      cohort_id, repo_id, full_name, consulted, truncated, locks_found_json, locks_read_json,
+      cause, origin, gate, cap, scope_statement, probed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
 
   for (const r of repos) {
     registerCohortMember(db, cohortId, r.id, r.full_name, dryRun);
     try {
       const branch = r.default_branch || 'main';
       let got = null;
-      if (fetchMode === 'raw') got = await scanRaw(r.owner, r.name, branch);
-      else if (fetchMode === 'tarball') got = await scanTarball(r.owner, r.name, branch);
-      else got = await scanBlobs(r.owner, r.name, branch, headers, apiCounter);
+      if (fetchMode === 'tarball') got = await scanTarball(r.owner, r.name, branch);
+      else if (fetchMode === 'blobs') got = await scanBlobs(r.owner, r.name, branch, headers, apiCounter);
+      else got = await scanRaw(r.owner, r.name, branch);
 
       if (!got || got.truncated) {
         recordAttrition(db, { dryRun, cohortId, repoId: r.id, input: r.full_name, fromStage: 'resolve', toStage: 'scan', reason: 'tree_unusable_or_fetch_failed', failures });
         await sleep(delayMs);
         continue;
+      }
+
+      // Profondeur de sonde (§23) : si aucun lockfile lu en racine (ou fetchMode=tree), consulter git/trees
+      const hasRootLock = Object.keys(got.blobs).some(k => LOCKFILES_SET.has(k.split('/').pop()));
+      let probeOutcome = null;
+
+      if (!hasRootLock || fetchMode === 'tree') {
+        const located = await locateLockfiles(r.owner, r.name, branch, url => fetchGitHub(url, headers, apiCounter));
+        got.manifestProbe.tree_consulted = Boolean(located.consulted);
+
+        let readRes = { read: [], skipped: got.skipped || [] };
+        if (located.consulted && !located.truncated && located.locks.length > 0) {
+          const depth0 = located.locks.filter(l => l.depth === 0);
+          const targetLocks = depth0.length > 0 ? depth0 : located.locks.slice(0, 4);
+          readRes = await readLocks(r.owner, r.name, branch, targetLocks, DEFAULT_LOCK_CAP_BYTES);
+          for (const l of readRes.read) {
+            got.blobs[l.path] = l.text;
+          }
+          if (readRes.read.length > 0 && got.scope === 'no_manifest_found') {
+            got.scope = 'tree_lockfiles';
+          }
+          got.manifestProbe.found = Object.keys(got.blobs);
+          got.manifestProbe.skipped = readRes.skipped;
+          got.manifestProbe.missing = Math.max(0, ALL_TARGETS.length - got.manifestProbe.found.length);
+        }
+
+        const existingRead = Object.keys(got.blobs)
+          .filter(k => LOCKFILES_SET.has(k.split('/').pop()))
+          .map(k => ({ path: k }));
+        const bc = blockCause({
+          located,
+          read: readRes.read.length > 0 ? readRes.read : existingRead,
+          skipped: readRes.skipped,
+          capBytes: DEFAULT_LOCK_CAP_BYTES,
+          pinnedAccepted: false,
+        });
+        probeOutcome = {
+          consulted: located.consulted ? 1 : 0,
+          truncated: located.truncated ? 1 : 0,
+          locksFound: located.locks.map(l => ({ path: l.path, size: l.size, depth: l.depth })),
+          locksRead: (readRes.read.length > 0 ? readRes.read : existingRead).map(l => l.path),
+          cause: bc.cause,
+          origin: bc.origin,
+          gate: bc.cause ? (bc.origin === 'probe' ? 'INDETERMINATE' : bc.cause) : 'PASS',
+          cap: bc.cap,
+          scopeStatement: scopeStatement(bc),
+        };
+      } else {
+        const readLockPaths = Object.keys(got.blobs).filter(k => LOCKFILES_SET.has(k.split('/').pop()));
+        probeOutcome = {
+          consulted: got.manifestProbe.tree_consulted ? 1 : 0,
+          truncated: 0,
+          locksFound: readLockPaths.map(p => ({ path: p, size: Buffer.byteLength(got.blobs[p], 'utf8'), depth: 0 })),
+          locksRead: readLockPaths,
+          cause: null,
+          origin: null,
+          gate: 'PASS',
+          cap: 'ALLOW',
+          scopeStatement: null,
+        };
       }
 
       if (got.scope === 'no_manifest_found') {
@@ -754,6 +917,13 @@ export async function scanStage(db, { limit = 500, fetchMode = 'raw', delayMs = 
         const factId = Number(info.lastInsertRowid);
         updateRef.run(`behavioral_facts:${factId}`, factId);
         upsertManifest.run(r.full_name, JSON.stringify(got.blobs), got.scope, JSON.stringify(got.manifestProbe), now);
+        insertProbeOutcome.run(
+          cohortId || null, r.id, r.full_name,
+          probeOutcome.consulted, probeOutcome.truncated,
+          JSON.stringify(probeOutcome.locksFound), JSON.stringify(probeOutcome.locksRead),
+          probeOutcome.cause, probeOutcome.origin, probeOutcome.gate, probeOutcome.cap, probeOutcome.scopeStatement,
+          now
+        );
       }
       if (got.scope !== 'no_manifest_found') scanned++;
     } catch (err) {
@@ -762,14 +932,16 @@ export async function scanStage(db, { limit = 500, fetchMode = 'raw', delayMs = 
     await sleep(delayMs);
   }
 
-  // Enregistrer explicitement toute attrition due au --limit restant
-  const skippedByLimit = db.prepare(`
-    SELECT r.id, r.full_name FROM repos r
-    WHERE NOT EXISTS (SELECT 1 FROM behavioral_facts b WHERE b.owner = r.owner AND b.name = r.name AND b.scan_mode = 'STATIC')
-  `).all();
-  for (const s of skippedByLimit) {
-    if (!failures.some(f => f.repo === s.full_name && f.to_stage === 'scan')) {
-      recordAttrition(db, { dryRun, cohortId, repoId: s.id, input: s.full_name, fromStage: 'resolve', toStage: 'scan', reason: 'limit_cap_reached', failures });
+  // Enregistrer explicitement toute attrition due au --limit restant (sauf filtre ciblé --repo)
+  if (!repoFilter || repoFilter.length === 0) {
+    const skippedByLimit = db.prepare(`
+      SELECT r.id, r.full_name FROM repos r
+      WHERE NOT EXISTS (SELECT 1 FROM behavioral_facts b WHERE b.owner = r.owner AND b.name = r.name AND b.scan_mode = 'STATIC')
+    `).all();
+    for (const s of skippedByLimit) {
+      if (!failures.some(f => f.repo === s.full_name && f.to_stage === 'scan')) {
+        recordAttrition(db, { dryRun, cohortId, repoId: s.id, input: s.full_name, fromStage: 'resolve', toStage: 'scan', reason: 'limit_cap_reached', failures });
+      }
     }
   }
 
@@ -798,6 +970,7 @@ async function anchorRepoIdentity(db, r, blobs, { dryRun = false, skipAnchor = f
     canonical: repoRow.full_name,
     resolved_id: repoRow.id,
     anchor: expected,
+    assurance_scope: buildIdentityScope(verdict, expected),
     status: repoRow.fork ? 'FORK' : verdict.status,
     match: repoRow.fork ? false : verdict.match,
     anchored_at: new Date().toISOString(),
@@ -809,17 +982,23 @@ async function anchorRepoIdentity(db, r, blobs, { dryRun = false, skipAnchor = f
   return updated;
 }
 
-export async function osvStage(db, { limit = 500, dryRun = false, force = false, cohortId = null, skipAnchor = false, failures, blobCache }) {
-  const repos = force
-    ? db.prepare('SELECT id, owner, name, full_name FROM repos LIMIT ?').all(limit)
-    : db.prepare(`
-        SELECT r.id, r.owner, r.name, r.full_name
-        FROM repos r
-        WHERE NOT EXISTS (
-          SELECT 1 FROM osv_queries o WHERE o.owner = r.owner AND o.name = r.name AND o.status = 'queried' AND o.coverage_gate IS NOT NULL
-        )
-        LIMIT ?
-      `).all(limit);
+export async function osvStage(db, { limit = 500, dryRun = false, force = false, cohortId = null, repoFilter = null, skipAnchor = false, failures, blobCache }) {
+  let repos;
+  if (repoFilter && repoFilter.length > 0) {
+    const ph = repoFilter.map(() => '?').join(',');
+    repos = db.prepare(`SELECT id, owner, name, full_name FROM repos WHERE full_name IN (${ph})`).all(...repoFilter);
+  } else if (force) {
+    repos = db.prepare('SELECT id, owner, name, full_name FROM repos LIMIT ?').all(limit);
+  } else {
+    repos = db.prepare(`
+      SELECT r.id, r.owner, r.name, r.full_name
+      FROM repos r
+      WHERE NOT EXISTS (
+        SELECT 1 FROM osv_queries o WHERE o.owner = r.owner AND o.name = r.name AND o.status = 'queried' AND o.coverage_gate IS NOT NULL
+      )
+      LIMIT ?
+    `).all(limit);
+  }
   let osvOk = 0;
   let coveragePass = 0;
 
@@ -1014,6 +1193,9 @@ if (process.argv[1] && process.argv[1].endsWith('scan-corpus.mjs')) {
   const FETCH = arg('fetch') || 'raw';
   const DELAY = Number(arg('delay') || 120);
   const COHORT = arg('cohort') || null;
+  const REPO_ARG = arg('repo') || null;
+  const REPO_FILTER = REPO_ARG ? REPO_ARG.split(',').map(s => s.trim()).filter(Boolean) : null;
+  const BAND_ARG = arg('expect-band') || null;
   const DRY = process.argv.includes('--dry-run');
   const FORCE = process.argv.includes('--force');
   const SKIP_ANCHOR = process.argv.includes('--skip-anchor');
@@ -1051,10 +1233,10 @@ if (process.argv[1] && process.argv[1].endsWith('scan-corpus.mjs')) {
     Object.assign(out, await resolveStage(db, { limit: LIMIT, delayMs: DELAY, dryRun: DRY, force: FORCE, cohortId: COHORT, headers, failures, apiCounter }));
   }
   if (STAGE === 'all' || STAGE === 'scan') {
-    Object.assign(out, await scanStage(db, { limit: LIMIT, fetchMode: FETCH, delayMs: DELAY, dryRun: DRY, force: FORCE, cohortId: COHORT, headers, failures, apiCounter, blobCache }));
+    Object.assign(out, await scanStage(db, { limit: LIMIT, fetchMode: FETCH, delayMs: DELAY, dryRun: DRY, force: FORCE, cohortId: COHORT, repoFilter: REPO_FILTER, headers, failures, apiCounter, blobCache }));
   }
   if (STAGE === 'all' || STAGE === 'osv') {
-    Object.assign(out, await osvStage(db, { limit: LIMIT, dryRun: DRY, force: FORCE, cohortId: COHORT, skipAnchor: SKIP_ANCHOR, failures, blobCache }));
+    Object.assign(out, await osvStage(db, { limit: LIMIT, dryRun: DRY, force: FORCE, cohortId: COHORT, repoFilter: REPO_FILTER, skipAnchor: SKIP_ANCHOR, failures, blobCache }));
   }
 
   if (runId) {
@@ -1076,17 +1258,29 @@ if (process.argv[1] && process.argv[1].endsWith('scan-corpus.mjs')) {
   }
 
   const census = computeCensus(db, COHORT);
+  let sanityBand = null;
+  if (BAND_ARG) {
+    const [loStr, hiStr] = BAND_ARG.split(':');
+    const lo = Number(loStr);
+    const hi = Number(hiStr);
+    if (Number.isFinite(lo) && Number.isFinite(hi)) {
+      sanityBand = checkBand(census.verifiedAsResolved, { lo, hi });
+    }
+  }
+
   console.log(JSON.stringify({
     stage: STAGE,
     fetch: FETCH,
     cohort: COHORT,
+    repoFilter: REPO_FILTER,
     dry: DRY,
     apiCalls: apiCounter.calls,
     ...out,
     census,
+    sanityBand,
     attrition: failures
   }, null, 2));
 
   closeDatabase();
-  process.exit(0);
+  process.exit(sanityBand && !sanityBand.within ? 2 : 0);
 }

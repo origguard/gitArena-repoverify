@@ -142,3 +142,59 @@ export function assessRepo({
     },
   };
 }
+
+/**
+ * I7 · Décomposition exacte des raisons sur les dépôts ayant passé la couverture (`pass_coverage`).
+ * Garantit zéro chute anonyme : findingsOnly + advisoriesOnly + both + verified === rows.length.
+ */
+export function decomposeReasons(rows = []) {
+  let blockedFindingsOnly = 0;
+  let blockedAdvisoriesOnly = 0;
+  let blockedBoth = 0;
+  let deniedCritical = 0;
+  let verifiedAsResolved = 0;
+
+  for (const r of rows) {
+    const f = Number.isFinite(r?.findings) ? r.findings : Number(r?.f ?? 0);
+    const v = Number.isFinite(r?.vulns) ? r.vulns : Number(r?.v ?? 0);
+    const crit = Number.isFinite(r?.critical) ? r.critical : Number(r?.crit ?? 0);
+
+    if (crit > 0) deniedCritical++;
+    if (f > 0 && v === 0) blockedFindingsOnly++;
+    else if (f === 0 && v > 0) blockedAdvisoriesOnly++;
+    else if (f > 0 && v > 0) blockedBoth++;
+    else verifiedAsResolved++;
+  }
+
+  const passCoverage = rows.length;
+  const accounted = blockedFindingsOnly + blockedAdvisoriesOnly + blockedBoth + verifiedAsResolved;
+  return {
+    passCoverage,
+    blockedFindingsOnly,
+    blockedAdvisoriesOnly,
+    blockedBoth,
+    deniedCritical,
+    verifiedAsResolved,
+    accounted,
+    exactSum: accounted === passCoverage,
+  };
+}
+
+/**
+ * I8 · Bande de sanity en sortie d'exécution : transforme un écart inattendu
+ * en alerte d'invariant sur les gates plutôt qu'en auto-satisfaction.
+ */
+export function checkBand(observed, { lo = 5, hi = 40 } = {}) {
+  const obs = Number(observed);
+  const within = Number.isFinite(obs) && obs >= lo && obs <= hi;
+  return {
+    within,
+    observed: obs,
+    lo,
+    hi,
+    action: within ? 'publish' : 'HOLD_suspect_gate',
+    note: within
+      ? null
+      : `sortie hors bande [${lo}, ${hi}] (observé=${obs}) : suspecter un coverage_gate PASS par défaut, un plafond non appliqué ou une jointure qui double les lignes`,
+  };
+}

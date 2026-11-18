@@ -209,3 +209,24 @@ export function identityVerdict(expected, resolved) {
     note: 'upstream_registry_points_elsewhere',
   };
 }
+
+/**
+ * Publie explicitement la portée et les limites de l'ancrage déclaratif sur registre.
+ */
+export function buildIdentityScope(verdict, expected) {
+  const status = verdict?.status || 'UNANCHORED';
+  const anchored = status === 'CANONICAL_MATCH' || status === 'REDIRECTED';
+  return {
+    status,
+    attests: anchored
+      ? 'le dépôt résolu correspond à ce que l\'éditeur du paquet déclare au registre'
+      : null,
+    does_not_attest: [
+      'que ce soit le projet amont attendu',
+      'la titularité du nom de paquet (chain_of_title)',
+      'l\'absence de squat sur le registre déclaratif',
+    ],
+    anchor_declarative: Boolean(expected?.source),
+    anchor_source: expected?.source || null,
+  };
+}

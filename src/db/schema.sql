@@ -348,3 +348,23 @@ CREATE TABLE IF NOT EXISTS stage_attrition (
 );
 
 CREATE INDEX IF NOT EXISTS idx_stage_attrition_cohort ON stage_attrition(cohort_id, from_stage, to_stage);
+
+-- 22. Phase V (§23) : Traçabilité de profondeur de sonde (origine 'probe' vs 'repo')
+CREATE TABLE IF NOT EXISTS probe_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cohort_id TEXT,
+    repo_id INTEGER,
+    full_name TEXT NOT NULL,
+    consulted INTEGER NOT NULL DEFAULT 0,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    locks_found_json TEXT NOT NULL DEFAULT '[]',
+    locks_read_json TEXT NOT NULL DEFAULT '[]',
+    cause TEXT,
+    origin TEXT,
+    gate TEXT NOT NULL,
+    cap TEXT NOT NULL,
+    scope_statement TEXT,
+    probed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_probe_outcomes_repo ON probe_outcomes(full_name, probed_at DESC);

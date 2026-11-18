@@ -17,7 +17,8 @@ import {
   evaluatePolicyAction
 } from './evidence.mjs';
 import { revokeKeyId, isKeyRevoked } from './revocation.mjs';
-import { assessCoverage, gateCompleteness, applyCap } from './completeness.mjs';
+import { assessCoverage, gateCompleteness, applyCap, decomposeReasons } from './completeness.mjs';
+import { buildIdentityScope } from './identity-anchor.mjs';
 
 /**
  * Registre de Signatures d'Intégrité Ed25519 — Pilier 2 (RepoVerify / GitArena)
@@ -330,6 +331,13 @@ export function evaluateGatekeeperPolicy(inspectPayload, behaviorFacts, osvSumma
   }
 
   const policyAction = evaluatePolicyAction({ verdict: decision }, policyProfile);
+  let identityMeta = null;
+  try {
+    const db = getDb();
+    const rIdRow = db.prepare('SELECT identity_json FROM repos WHERE full_name = ?').get(repo.full_name);
+    if (rIdRow?.identity_json) identityMeta = JSON.parse(rIdRow.identity_json);
+  } catch { /* fallback if no repos row */ }
+  const identityScope = buildIdentityScope(identityMeta, identityMeta?.anchor || null);
 
   return {
     decision,
@@ -353,7 +361,10 @@ export function evaluateGatekeeperPolicy(inspectPayload, behaviorFacts, osvSumma
       osvScanned: Boolean(osvSummary?.scanned),
       osvMaxSeverity: osvSummary?.maxSeverity || 'NONE',
       coverageGate: osvSummary?.coverageGate || (osvSummary?.scanned ? 'NO_LOCKFILE' : null),
-      lockfileUsed: osvSummary?.lockfileUsed || null
+      lockfileUsed: osvSummary?.lockfileUsed || null,
+      assuranceScope: {
+        identity: identityScope
+      }
     }
   };
 }
@@ -577,6 +588,38 @@ export function getHonestCensus() {
         (SELECT COUNT(*) FROM integrity_signatures WHERE decision = 'ALLOW' AND evidence_level >= ?) AS signed_allow
     `).get(ALLOW_FLOOR);
 
+    const passRows = db.prepare(`
+      WITH latest_b AS (
+        SELECT owner, name, full_name, findings_json,
+               ROW_NUMBER() OVER (PARTITION BY owner, name ORDER BY scanned_at DESC, id DESC) AS rn
+        FROM behavioral_facts
+        WHERE scan_mode = 'STATIC' AND COALESCE(scan_scope, '') != 'no_manifest_found'
+      ),
+      latest_o AS (
+        SELECT owner, name, full_name, vulns_json, status, coverage_gate,
+               ROW_NUMBER() OVER (PARTITION BY owner, name ORDER BY queried_at DESC, id DESC) AS rn
+        FROM osv_queries
+      )
+      SELECT json_array_length(b.findings_json) AS findings,
+             json_array_length(o.vulns_json) AS vulns,
+             (SELECT COUNT(*) FROM json_each(o.vulns_json)
+              WHERE LOWER(COALESCE(json_extract(value, '$.severity'), '')) IN ('critical', 'high')) AS critical,
+             json_extract(r.identity_json, '$.status') AS id_status,
+             json_extract(r.identity_json, '$.anchor.url') AS anchor_url
+      FROM latest_b b
+      JOIN latest_o o ON o.owner = b.owner AND o.name = b.name AND o.rn = 1
+      LEFT JOIN repos r ON r.owner = b.owner AND r.name = b.name
+      WHERE b.rn = 1 AND o.status = 'queried' AND COALESCE(o.coverage_gate, '') = 'PASS'
+    `).all();
+    const passBreakdown = decomposeReasons(passRows);
+    const verifiedAsResolved = Math.max(passBreakdown.verifiedAsResolved, row.signed_allow || 0);
+    const verifiedAsNamed = passRows.filter(p =>
+      Number(p.findings || 0) === 0 &&
+      Number(p.vulns || 0) === 0 &&
+      (p.id_status === 'CANONICAL_MATCH' || p.id_status === 'REDIRECTED') &&
+      Boolean(p.anchor_url)
+    ).length;
+
     const inputs = row.inputs || row.indexed || 0;
     const attempted = row.attempted || 0;
     const unattempted = row.inputs > 0 ? (row.unattempted || 0) : inputs;
@@ -584,7 +627,7 @@ export function getHonestCensus() {
     const resolved = row.resolved || 0;
     const staticScanned = row.static_scanned || 0;
     const osvQueried = row.osv_queried || 0;
-    const verifiedWithEvidence = Math.max(row.derived_verified || 0, row.signed_allow || 0);
+    const verifiedWithEvidence = verifiedAsResolved;
 
     return {
       indexed: row.indexed || 0,
@@ -596,8 +639,12 @@ export function getHonestCensus() {
       resolved,
       staticScanned,
       osvQueried,
+      coveragePass: passBreakdown.passCoverage,
       verifiedWithEvidence,
-      chainSummary: `inputs=${inputs} attempted=${attempted} unattempted=${unattempted} ghosts=${ghosts} resolved=${resolved} static=${staticScanned} osv=${osvQueried} verified=${verifiedWithEvidence}`
+      verifiedAsResolved,
+      verifiedAsNamed,
+      passBreakdown,
+      chainSummary: `inputs=${inputs} attempted=${attempted} unattempted=${unattempted} ghosts=${ghosts} resolved=${resolved} static=${staticScanned} osv=${osvQueried} pass=${passBreakdown.passCoverage} verified=${verifiedAsResolved} (named=${verifiedAsNamed})`
     };
   } catch {
     return {
