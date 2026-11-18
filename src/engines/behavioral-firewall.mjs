@@ -123,7 +123,8 @@ export function summarizeBehavioralFindings(findings, scanMode = 'STATIC', conte
   }
 
   const riskScore = Math.min(100, rawRisk);
-  const normalizedMode = scanMode === 'DIR_NOT_FOUND' ? null : 'STATIC';
+  const normalizedMode = scanMode === 'METADATA_ONLY' ? 'METADATA_ONLY' : (scanMode === null || scanMode === 'DIR_NOT_FOUND' ? null : 'STATIC');
+  const scanScope = context.scanScope || null;
   const decided = decide({
     behavioral: normalizedMode ? { scanMode: normalizedMode, findings: unique, ref: context.ref || null } : null,
     osv: context.osv || null,
@@ -131,13 +132,34 @@ export function summarizeBehavioralFindings(findings, scanMode = 'STATIC', conte
   });
 
   return {
-    scanMode,
+    scanMode: normalizedMode,
+    scanScope,
     verdict: decided.verdict,
     evidenceLevel: decided.evidenceLevel,
     riskScore,
     findingsCount: unique.length,
     findings: unique.slice(0, 25)
   };
+}
+
+/**
+ * Analyse un dictionnaire de blobs lus (ex: depuis tarball ou API contents)
+ */
+export function scanBlobsBehavior(blobsMap = {}, scanScope = 'tarball_manifests') {
+  const allFindings = [];
+  let filesScanned = 0;
+  for (const [relPath, text] of Object.entries(blobsMap || {})) {
+    if (typeof text !== 'string' || !text.length) continue;
+    const base = relPath.split('/').pop();
+    if (base === 'package.json') {
+      allFindings.push(...scanPackageJsonHooks(text));
+    }
+    allFindings.push(...scanTextBehavior(text, relPath));
+    filesScanned++;
+  }
+  const summary = summarizeBehavioralFindings(allFindings, 'STATIC', { scanScope });
+  summary.filesScanned = filesScanned;
+  return summary;
 }
 
 /**
@@ -190,7 +212,7 @@ export function scanDirectoryBehavior(rootDir) {
   }
 
   walk(rootDir);
-  const summary = summarizeBehavioralFindings(allFindings, 'LOCAL_CLONE_PREFLIGHT');
+  const summary = summarizeBehavioralFindings(allFindings, 'STATIC', { scanScope: 'local_clone_preflight' });
   summary.filesScanned = filesScanned;
   return summary;
 }

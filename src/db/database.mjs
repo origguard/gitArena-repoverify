@@ -55,6 +55,15 @@ export function initDatabase(dbPath = null) {
      WHERE evidence_level IS NULL;
   `);
 
+  // Migration idempotente §14 : ajout scan_scope & ref sur behavioral_facts
+  const factCols = db.prepare('PRAGMA table_info(behavioral_facts)').all().map(c => c.name);
+  if (!factCols.includes('scan_scope')) {
+    db.exec('ALTER TABLE behavioral_facts ADD COLUMN scan_scope TEXT;');
+  }
+  if (!factCols.includes('ref')) {
+    db.exec('ALTER TABLE behavioral_facts ADD COLUMN ref TEXT;');
+  }
+
   instance = db;
   return db;
 }

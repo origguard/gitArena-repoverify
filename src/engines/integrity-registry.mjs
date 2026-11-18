@@ -125,7 +125,7 @@ export function getCachedBehaviorOrAnalyze(ownerOrFullName, maybeName = null) {
   try {
     const db = getDb();
     const row = db.prepare(`
-      SELECT id, scan_mode, findings_json, scanned_at
+      SELECT id, scan_mode, scan_scope, ref, findings_json, scanned_at
       FROM behavioral_facts
       WHERE owner = ? AND name = ?
       ORDER BY scanned_at DESC, id DESC
@@ -133,47 +133,70 @@ export function getCachedBehaviorOrAnalyze(ownerOrFullName, maybeName = null) {
     `).get(String(owner || ''), String(name || ''));
 
     if (!row) {
-      return { scanMode: null, findings: [], ref: null, scannedAt: null };
+      return { scanMode: null, scanScope: null, findings: [], ref: null, scannedAt: null };
     }
     return {
       scanMode: row.scan_mode,
+      scanScope: row.scan_scope || null,
       findings: JSON.parse(row.findings_json || '[]'),
-      ref: `behavioral_facts:${row.id}`,
+      ref: row.ref || `behavioral_facts:${row.id}`,
       scannedAt: row.scanned_at
     };
   } catch {
-    return { scanMode: null, findings: [], ref: null, scannedAt: null };
+    return { scanMode: null, scanScope: null, findings: [], ref: null, scannedAt: null };
   }
 }
 
-export function recordBehavioralFacts({ owner, name, fullName, commitSha = null, scanMode = 'STATIC', findings = [], scannerVersion = '1.0.0' }) {
+export function recordBehavioralFacts({ owner, name, fullName, commitSha = null, scanMode = 'STATIC', scanScope = null, findings = [], scannerVersion = '1.0.0' }) {
   const db = getDb();
   const res = db.prepare(`
     INSERT INTO behavioral_facts (
-      owner, name, full_name, commit_sha, scan_mode, findings_json, scanned_at, scanner_version
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      owner, name, full_name, commit_sha, scan_mode, scan_scope, findings_json, scanned_at, scanner_version
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     owner,
     name,
     fullName || `${owner}/${name}`,
     commitSha,
     scanMode,
+    scanScope,
     JSON.stringify(findings || []),
     new Date().toISOString(),
     scannerVersion
   );
   const id = Number(res.lastInsertRowid);
+  const ref = `behavioral_facts:${id}`;
+  db.prepare('UPDATE behavioral_facts SET ref = ? WHERE id = ?').run(ref, id);
   return {
     id,
     scanMode,
+    scanScope,
     findings: findings || [],
-    ref: `behavioral_facts:${id}`
+    ref
   };
 }
 
 function getCachedOsvSummary(fullName) {
   try {
     const db = getDb();
+    const osvRow = db.prepare(`
+      SELECT ref, vulns_json, status
+      FROM osv_queries
+      WHERE full_name = ? AND status = 'queried'
+      ORDER BY queried_at DESC, id DESC
+      LIMIT 1
+    `).get(fullName);
+
+    if (osvRow) {
+      const vulns = JSON.parse(osvRow.vulns_json || '[]');
+      return {
+        scanned: true,
+        totalVulnerabilities: vulns.length,
+        maxSeverity: vulns.length > 0 ? 'HIGH' : 'NONE',
+        ref: osvRow.ref
+      };
+    }
+
     const gRow = db.prepare('SELECT dependencies_json FROM gitingest_cache WHERE full_name = ?').get(fullName);
     if (!gRow) return { scanned: false, totalVulnerabilities: 0, maxSeverity: 'NONE', ref: null };
     const deps = JSON.parse(gRow.dependencies_json || '{}');
@@ -500,15 +523,33 @@ export function getHonestCensus() {
     const row = db.prepare(`
       SELECT
         (SELECT COUNT(*) FROM repositories) AS indexed,
-        (SELECT COUNT(DISTINCT full_name) FROM behavioral_facts WHERE scan_mode = 'STATIC') AS static_scanned,
-        (SELECT COUNT(*) FROM integrity_signatures WHERE decision = 'ALLOW' AND evidence_level >= ?) AS allow_with_evidence
+        (SELECT COUNT(*) FROM corpus_inputs) AS inputs,
+        (SELECT COUNT(*) FROM repos) AS resolved,
+        (SELECT COUNT(DISTINCT owner || '/' || name) FROM behavioral_facts WHERE scan_mode = 'STATIC') AS static_scanned,
+        (SELECT COUNT(DISTINCT owner || '/' || name) FROM osv_queries WHERE status = 'queried') AS osv_queried,
+        (SELECT COUNT(*) FROM (
+          SELECT b.owner, b.name
+          FROM behavioral_facts b
+          JOIN osv_queries o ON o.owner = b.owner AND o.name = b.name
+          WHERE b.scan_mode = 'STATIC'
+            AND o.status = 'queried'
+            AND json_array_length(b.findings_json) = 0
+            AND json_array_length(o.vulns_json) = 0
+          GROUP BY b.owner, b.name
+        )) AS derived_verified,
+        (SELECT COUNT(*) FROM integrity_signatures WHERE decision = 'ALLOW' AND evidence_level >= ?) AS signed_allow
     `).get(ALLOW_FLOOR);
+
+    const verified = Math.max(row.derived_verified || 0, row.signed_allow || 0);
     return {
       indexed: row.indexed || 0,
+      inputs: row.inputs || 0,
+      resolved: row.resolved || 0,
       staticScanned: row.static_scanned || 0,
-      verifiedWithEvidence: row.allow_with_evidence || 0
+      osvQueried: row.osv_queried || 0,
+      verifiedWithEvidence: verified
     };
   } catch {
-    return { indexed: 0, staticScanned: 0, verifiedWithEvidence: 0 };
+    return { indexed: 0, inputs: 0, resolved: 0, staticScanned: 0, osvQueried: 0, verifiedWithEvidence: 0 };
   }
 }

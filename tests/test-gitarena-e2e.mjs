@@ -28,6 +28,7 @@ import { badgeState, revokeKeyId } from '../src/engines/revocation.mjs';
 import { dedupe } from '../src/engines/corpus-audit.mjs';
 import { executionVerdict } from '../src/engines/recipes.mjs';
 import { evaluateGolden } from './golden-eval.mjs';
+import { extractDeps, computeCensus } from '../scripts/scan-corpus.mjs';
 import { runPrGuard } from '../src/engines/pr-guard.mjs';
 import { issueOrgLicense, verifyOrgLicense } from '../src/engines/license-tier.mjs';
 import { createGitArenaServer } from '../src/server/server.mjs';
@@ -43,7 +44,7 @@ async function runE2eHarness() {
   console.log('======================================================\n');
 
   let passedTests = 0;
-  const totalTests = 26;
+  const totalTests = 27;
 
   // TEST-01 : Schéma & Persistance SQLite WAL
   console.log('[TEST-01] Vérification du Schéma & Mode WAL SQLite...');
@@ -57,11 +58,12 @@ async function runE2eHarness() {
     'gitingest_cache', 'ci_telemetry_cache', 'osv_vuln_cache', 'workflow_audit_log',
     'maintainer_health_cache', 'arena_tournaments',
     'behavioral_audits', 'behavioral_facts', 'integrity_signatures', 'revoked_keys',
-    'execution_benchmarks', 'org_policies'
+    'execution_benchmarks', 'org_policies',
+    'corpus_inputs', 'repos', 'manifest_cache', 'osv_queries', 'scan_runs'
   ]) {
     assert.ok(tables.includes(requiredTable), `Table ${requiredTable} absente`);
   }
-  console.log('  ✓ TEST-01 Validé : SQLite WAL et 16 tables opérationnels.');
+  console.log('  ✓ TEST-01 Validé : SQLite WAL et 21 tables opérationnels.');
   passedTests++;
 
   // TEST-02 : Ingestion & Seeding Réel
@@ -574,6 +576,7 @@ async function runE2eHarness() {
     'src/studio/video-studio.mjs',
     'src/studio/benchmark-publisher.mjs',
     'src/studio/gif-encoder.mjs',
+    'scripts/scan-corpus.mjs',
     'tests/golden-eval.mjs'
   ];
 
@@ -733,6 +736,44 @@ async function runE2eHarness() {
   assert.equal(executionVerdict({ isolation: 60, instrumented: true, buildExit: 0 }).evidenceLevel, Evidence.OSV_QUERIED);
   assert.equal(executionVerdict({ isolation: 85, instrumented: true, buildExit: 0 }).evidenceLevel, Evidence.EXECUTED);
   console.log('  ✓ TEST-26 Validé : Merkle SHA-256, Révocation TTL, Golden Set & Dedupe conformes.');
+  passedTests++;
+
+  // TEST-27 : Phase III — Indexeur 3 étages (extractDeps, scan_scope, computeCensus isolé)
+  console.log('[TEST-27] Vérification Phase III (Indexeur 3 étages, Enum scan_scope, Census)...');
+  const extracted = extractDeps({
+    'package.json': JSON.stringify({ dependencies: { express: '^4.18.2', bad: '*' } }),
+    'requirements.txt': 'fastapi==0.115.0\nrequests>=2.31.0\n',
+    'Cargo.toml': '[dependencies]\nserde = "1.0.210"\n',
+    'go.mod': 'require (\n\tgithub.com/gin-gonic/gin v1.10.0\n)\n'
+  });
+  assert.equal(extracted.length, 4, 'Doit extraire uniquement les versions épinglées npm/PyPI/crates.io/Go');
+  assert.equal(scanDirectoryBehavior(join(__dirname, '..', 'src')).scanMode, 'STATIC');
+  assert.equal(scanDirectoryBehavior(join(__dirname, '..', 'src')).scanScope, 'local_clone_preflight');
+
+  const tmpIdxDir = mkdtempSync(join(tmpdir(), 'repoverify-p3-'));
+  try {
+    const idxDb = new DatabaseSync(join(tmpIdxDir, 'p3.sqlite'));
+    idxDb.exec(readFileSync(join(__dirname, '../src/db/schema.sql'), 'utf8'));
+    idxDb.prepare('INSERT INTO corpus_inputs (input, added_at) VALUES (?, ?)').run('clean/pkg', '2026-11-17');
+    idxDb.prepare('INSERT INTO corpus_inputs (input, added_at) VALUES (?, ?)').run('nopins/pkg', '2026-11-17');
+    idxDb.prepare('INSERT INTO repos (id, owner, name, full_name, resolved_at) VALUES (?, ?, ?, ?, ?)').run(10, 'clean', 'pkg', 'clean/pkg', '2026-11-17');
+    idxDb.prepare('INSERT INTO repos (id, owner, name, full_name, resolved_at) VALUES (?, ?, ?, ?, ?)').run(11, 'nopins', 'pkg', 'nopins/pkg', '2026-11-17');
+    idxDb.prepare("INSERT INTO behavioral_facts (owner, name, full_name, scan_mode, scan_scope, ref, findings_json, scanned_at, scanner_version) VALUES ('clean','pkg','clean/pkg','STATIC','tarball_manifests','behavioral_facts:1','[]','2026-11-17','v0.5')").run();
+    idxDb.prepare("INSERT INTO behavioral_facts (owner, name, full_name, scan_mode, scan_scope, ref, findings_json, scanned_at, scanner_version) VALUES ('nopins','pkg','nopins/pkg','STATIC','tarball_manifests','behavioral_facts:2','[]','2026-11-17','v0.5')").run();
+    idxDb.prepare("INSERT INTO osv_queries (owner, name, full_name, ecosystem, packages, vulns_json, queried_at, ref, status) VALUES ('clean','pkg','clean/pkg','npm',1,'[]','2026-11-17','osv:clean/pkg:1','queried')").run();
+    idxDb.prepare("INSERT INTO osv_queries (owner, name, full_name, ecosystem, packages, vulns_json, queried_at, ref, status) VALUES ('nopins','pkg','nopins/pkg','none',0,'[]','2026-11-17','osv:nopins/pkg:none','no_pinned_deps')").run();
+
+    const p3Census = computeCensus(idxDb);
+    assert.equal(p3Census.inputs, 2);
+    assert.equal(p3Census.resolved, 2);
+    assert.equal(p3Census.staticScanned, 2);
+    assert.equal(p3Census.osvQueried, 1, 'no_pinned_deps ne compte pas comme osv_queried');
+    assert.equal(p3Census.verifiedWithEvidence, 1, 'Seul clean/pkg atteint niveau >= 3 sans findings ni CVEs');
+    idxDb.close();
+  } finally {
+    rmSync(tmpIdxDir, { recursive: true, force: true });
+  }
+  console.log('  ✓ TEST-27 Validé : extractDeps, scan_scope, et computeCensus isolé conformes.');
   passedTests++;
 
   console.log('\n======================================================');

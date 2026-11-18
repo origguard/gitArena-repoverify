@@ -176,7 +176,7 @@ CREATE TABLE IF NOT EXISTS behavioral_audits (
 
 CREATE INDEX IF NOT EXISTS idx_behavior_repo ON behavioral_audits(full_name);
 
--- 11b. Faits Comportementaux Séparés du Verdict (Runbook §4.4)
+-- 11b. Faits Comportementaux Séparés du Verdict (Runbook §4.4 & III §14)
 CREATE TABLE IF NOT EXISTS behavioral_facts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     owner TEXT NOT NULL,
@@ -184,6 +184,8 @@ CREATE TABLE IF NOT EXISTS behavioral_facts (
     full_name TEXT NOT NULL,
     commit_sha TEXT,
     scan_mode TEXT NOT NULL CHECK (scan_mode IN ('METADATA_ONLY', 'STATIC')),
+    scan_scope TEXT,
+    ref TEXT,
     findings_json TEXT NOT NULL DEFAULT '[]',
     scanned_at TEXT NOT NULL DEFAULT (datetime('now')),
     scanner_version TEXT NOT NULL
@@ -244,4 +246,68 @@ CREATE TABLE IF NOT EXISTS org_policies (
     policy_json TEXT NOT NULL,
     license_token TEXT,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 15. Phase III (§13) : Entrées du corpus à résoudre par l'indexeur
+CREATE TABLE IF NOT EXISTS corpus_inputs (
+    input TEXT PRIMARY KEY,
+    added_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 16. Phase III (§13) : Dépôts résolus canoniquement par ID numérique GitHub
+CREATE TABLE IF NOT EXISTS repos (
+    id INTEGER PRIMARY KEY,
+    owner TEXT NOT NULL,
+    name TEXT NOT NULL,
+    full_name TEXT NOT NULL UNIQUE,
+    default_branch TEXT NOT NULL DEFAULT 'main',
+    archived INTEGER NOT NULL DEFAULT 0,
+    fork INTEGER NOT NULL DEFAULT 0,
+    stars INTEGER NOT NULL DEFAULT 0,
+    language TEXT,
+    license TEXT,
+    pushed_at TEXT,
+    resolved_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_repos_canon_full ON repos(full_name);
+
+-- 17. Phase III (§14) : Cache de manifestes bruts lus lors du scan (permet --stage=osv séparé)
+CREATE TABLE IF NOT EXISTS manifest_cache (
+    full_name TEXT PRIMARY KEY,
+    blobs_json TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    cached_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 18. Phase III (§15) : Interrogations OSV.dev datées & référencées (niveaux 2 vs 3)
+CREATE TABLE IF NOT EXISTS osv_queries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner TEXT NOT NULL,
+    name TEXT NOT NULL,
+    full_name TEXT NOT NULL,
+    ecosystem TEXT NOT NULL,
+    packages INTEGER NOT NULL,
+    vulns_json TEXT NOT NULL DEFAULT '[]',
+    queried_at TEXT NOT NULL,
+    ref TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('queried', 'no_pinned_deps', 'error'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_osv_queries_repo ON osv_queries(owner, name, queried_at DESC);
+
+-- 19. Phase III (§16) : Historique des exécutions de l'indexeur (scan_runs)
+CREATE TABLE IF NOT EXISTS scan_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    stage TEXT NOT NULL,
+    fetch_mode TEXT,
+    resolved INTEGER DEFAULT 0,
+    ghosts INTEGER DEFAULT 0,
+    dupes INTEGER DEFAULT 0,
+    scanned INTEGER DEFAULT 0,
+    osv_ok INTEGER DEFAULT 0,
+    api_calls INTEGER DEFAULT 0,
+    failures TEXT DEFAULT '[]'
 );

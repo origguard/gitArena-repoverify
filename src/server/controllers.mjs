@@ -296,13 +296,16 @@ export function getStats(req, res) {
   return sendJson(res, 200, {
     totalRepositories: totalRepos,
     indexedCount: census.indexed,
+    inputsCount: census.inputs,
+    resolvedCount: census.resolved,
     staticScannedCount: census.staticScanned,
+    osvQueriedCount: census.osvQueried,
     verifiedWithEvidenceCount: census.verifiedWithEvidence,
     totalDuelsPlayed: duelsCount,
     totalHarnessRuns: harnessCount,
     commercialSafePercentage: Math.round((permissiveCount / (totalRepos || 1)) * 100),
     averageAiScore: Math.round((avgScoreRow.avgScore || 0) * 10) / 10,
-    inspectorEngine: 'RepoVerify / G0D-PRÆTOR Engine v3.2 (Fail-Closed)',
+    inspectorEngine: 'RepoVerify / G0D-PRÆTOR Engine v3.3 (Fail-Closed)',
     status: 'SYSTEM_OPERATIONAL'
   });
 }

@@ -105,6 +105,23 @@ Ajoutez la configuration suivante dans votre client MCP (Antigravity, Cursor, Cl
 
 Outils MCP exposés (5 outils) : `search_repos`, `inspect_repo`, `get_codeintel`, `compare_repos`, `run_tournament`. La surface d'émission de verdicts (`gatekeep_install`, `/api/integrity/sign`) est fermée par défaut (`503` / `REPOVERIFY_EXPOSE_VERDICTS !== "true"`).
 
+### 5. Indexeur 3 étages (`npm run index`) & Recensement (`npm run census`)
+L'indexeur [scan-corpus.mjs](scripts/scan-corpus.mjs) résout les dépôts par ID numérique (`resolve`), analyse statiquement les manifestes/hooks par tarball (`scan` hors quota GitHub REST) et interroge `api.osv.dev/v1/querybatch` (`osv`, requis pour atteindre `evidenceLevel = 3`) :
+
+```bash
+# 1. Résolution canonique & déduplication (token GitHub requis au-delà de 60 req/h)
+npm run index -- --stage=resolve --limit=500
+
+# 2. Scan statique par tarball (hors quota API GitHub)
+npm run index -- --stage=scan --fetch=tarball --limit=500
+
+# 3. Interrogation OSV.dev par lot & recensement honnête
+npm run index -- --stage=osv --limit=500
+npm run census
+```
+
+> **Portée réseau :** l'indexeur (`scripts/scan-corpus.mjs`) interroge `api.github.com`, `codeload.github.com` et `api.osv.dev` lors de la construction du corpus ; l'interface et les artéfacts hors-ligne livrés au client ne font aucune requête sortante.
+
 ---
 
 ## Architecture du Projet
@@ -112,17 +129,17 @@ Outils MCP exposés (5 outils) : `search_repos`, `inspect_repo`, `get_codeintel`
 ```text
 ├── benchmarks/            # Rapports de tournois publics téléchargeables (Markdown, JSON, PDF)
 ├── docs/                  # Spécifications d'architecture (01-PRD à 08-VERIFICATION-HARNESS)
-├── scripts/               # Rotation de clé Ed25519 hors dépôt (rotate-key.mjs)
+├── scripts/               # Rotation de clé hors dépôt (rotate-key.mjs) & Indexeur 3 étages (scan-corpus.mjs)
 ├── src/
 │   ├── config/            # Drapeaux fail-closed (flags.mjs)
-│   ├── db/                # Schéma SQLite WAL/FTS5 (16 tables), migrations, Seeder & Bulk Ingestor
+│   ├── db/                # Schéma SQLite WAL/FTS5 (21 tables), migrations, Seeder & Bulk Ingestor
 │   ├── engines/           # Evidence Model, Integrity Registry Ed25519, Merkle SHA-256, Révocation, Corpus Audit, Recipes, PR Guard, Sandbox
 │   ├── mcp/               # Serveur Model Context Protocol (stdio JSON-RPC 2.0 — 5 outils actifs)
 │   ├── public/            # SPA Vanilla JS/CSS (Inspecteur, Arène & Tournoi, Radar, Signatures & Benchmarks, Explorateur)
 │   ├── server/            # Serveur HTTP souverain, garde 503 fail-closed, auth Open-Core API Key et contrôleurs REST
 │   ├── studio/            # Studio Vidéo MP4, GIF animé, Carrousels PDF LinkedIn & Benchmark Publisher
 │   └── workflows/         # Moteur d'automatisation TCA avec journalisation SHA-256
-├── tests/                 # Harnais de vérification E2E complet (26 tests dont invariants I1-I5 & Phase II, process.exit(0))
+├── tests/                 # Harnais de vérification E2E complet (27 tests) + Contrôles négatifs (12/12 PROBANTS)
 ├── videos/                # Vidéos de duels & tournois 9:16 + carrousels prêts pour les réseaux
 └── .github/workflows/     # Pipeline CI, PR Guard Template & actualisation hebdomadaire des benchmarks
 ```

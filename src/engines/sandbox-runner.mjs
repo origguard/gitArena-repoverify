@@ -220,6 +220,7 @@ export async function runSandboxVerification(owner, name, options = {}) {
         name,
         fullName,
         scanMode: 'STATIC',
+        scanScope: 'local_clone_preflight',
         findings: behaviorRaw.findings || [],
         scannerVersion: '3.2.0'
       });
