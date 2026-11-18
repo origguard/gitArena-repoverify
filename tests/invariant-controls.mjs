@@ -49,6 +49,10 @@ const checkBand = await tryImport(
   ['../src/engines/completeness.mjs'], m => m.checkBand);
 const blockCause = await tryImport(
   ['../src/engines/probe-depth.mjs'], m => m.blockCause);
+const auditGateInputs = await tryImport(
+  ['../src/engines/evidence.mjs'], m => m.auditGateInputs);
+const extractDepsWithCoverage = await tryImport(
+  ['../scripts/scan-corpus.mjs'], m => m.extractDepsWithCoverage);
 
 const db = initDatabase();
 
@@ -319,6 +323,76 @@ const CONTROLS = [
       }).origin === 'probe';
       const mutant = () => ({ cause: 'NO_LOCKFILE', origin: 'repo', cap: 'WARN' });
       return verdict(probe(blockCause), probe(mutant));
+    } },
+  { id: 'C-21', inv: 'I9 · deps_answered', defect: 'deps_queried compté comme répondu sans deps_answered',
+    run: () => {
+      if (!gateCompleteness) return 'NON_INSTRUMENTÉ';
+      const cfg = { enabled: true, threshold: 0.98, requireTransitive: true };
+      const probe = g => g({
+        lockfile: 'uv.lock',
+        deps_declared: 30,
+        deps_resolved: 181,
+        deps_queried: 181,
+        deps_answered: 0,
+        transitive: true,
+      }, cfg).cap !== 'ALLOW';
+      const mutant = cov => cov.deps_queried >= 181 ? ({ gate: 'PASS', cap: 'ALLOW' }) : ({ gate: 'FAIL', cap: 'INDETERMINATE' });
+      return verdict(probe(gateCompleteness), probe(mutant));
+    } },
+  { id: 'C-22', inv: 'I9 · findings null', defect: 'findings=null accepté comme [] et ALLOW',
+    run: () => {
+      if (!decide) return 'NON_INSTRUMENTÉ';
+      const probe = d => d({
+        behavioral: { scanMode: 'STATIC', ref: 'behavioral_facts:1', findings: null },
+        osv: { scanned: true, ref: 'osv:1', maxSeverity: 'NONE' },
+      }).verdict === 'INDETERMINATE';
+      const mutant = () => ({ verdict: 'ALLOW' });
+      return verdict(probe(decide), probe(mutant));
+    } },
+  { id: 'C-23', inv: 'I9 · truncated null', defect: 'truncated=null accepté comme non-tronqué',
+    run: () => {
+      if (!auditGateInputs) return 'NON_INSTRUMENTÉ';
+      const base = {
+        deps_resolved: 10, deps_queried: 10, deps_answered: 10,
+        findings: [], vulns: [], lockfile_used: 'uv.lock',
+        identity_status: 'CANONICAL_MATCH', scan_mode: 'STATIC',
+        archived: false, license_spdx: 'MIT', coverage_gate: 'PASS',
+        truncated: null,
+      };
+      const probe = fn => fn(base).cap !== 'ALLOW' && fn(base).missingOrOptimistic.includes('truncated');
+      const mutant = () => ({ cap: 'ALLOW', missingOrOptimistic: [] });
+      return verdict(probe(auditGateInputs), probe(mutant));
+    } },
+  { id: 'C-24', inv: 'I9 · archived null', defect: 'archived=null accepté comme false',
+    run: () => {
+      if (!auditGateInputs) return 'NON_INSTRUMENTÉ';
+      const base = {
+        deps_resolved: 10, deps_queried: 10, deps_answered: 10,
+        findings: [], vulns: [], lockfile_used: 'uv.lock',
+        identity_status: 'CANONICAL_MATCH', scan_mode: 'STATIC',
+        archived: null, license_spdx: 'MIT', coverage_gate: 'PASS',
+        truncated: false,
+      };
+      const probe = fn => fn(base).cap !== 'ALLOW' && fn(base).missingOrOptimistic.includes('archived');
+      const mutant = () => ({ cap: 'ALLOW', missingOrOptimistic: [] });
+      return verdict(probe(auditGateInputs), probe(mutant));
+    } },
+  { id: 'C-25', inv: 'I9 · uv.lock PEP440', defect: 'PEP 440 tronqué et editable compté comme PyPI',
+    run: () => {
+      if (!extractDepsWithCoverage) return 'NON_INSTRUMENTÉ';
+      const uv = [
+        '[[package]]', 'name = "pr-agent"', 'version = "0.49.0"', 'source = { editable = "." }',
+        '[[package]]', 'name = "idna"', 'version = "3.18"', 'source = { registry = "https://pypi.org/simple" }',
+        '[[package]]', 'name = "a2a-sdk"', 'version = "1.3.0"', 'source = { registry = "https://pypi.org/simple" }',
+      ].join('\n');
+      const probe = fn => {
+        const res = fn({ 'uv.lock': uv });
+        return res.deps.some(d => d.name === 'idna' && d.version === '3.18')
+          && !res.deps.some(d => d.name === 'pr-agent')
+          && res.depsResolved === 2;
+      };
+      const mutant = () => ({ deps: [{ name: 'pr-agent' }, { name: 'a2a-sdk', version: '1.3.0' }], depsResolved: 2 });
+      return verdict(probe(extractDepsWithCoverage), probe(mutant));
     } },
 ];
 
