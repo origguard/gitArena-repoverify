@@ -301,6 +301,7 @@ CREATE TABLE IF NOT EXISTS osv_queries (
     deps_declared INTEGER,
     deps_resolved INTEGER,
     deps_queried INTEGER,
+    deps_answered INTEGER DEFAULT 0,
     lockfile_used TEXT,
     coverage_gate TEXT
 );

@@ -29,15 +29,17 @@ export function assessCoverage({
   deps_declared = null,
   deps_resolved = null,
   deps_queried = 0,
+  deps_answered = 0,
   transitive = false,
 } = {}) {
   const declared = Number.isFinite(deps_declared) ? Number(deps_declared) : null;
   const resolved = Number.isFinite(deps_resolved) ? Number(deps_resolved) : null;
   const queried = Number.isFinite(deps_queried) ? Number(deps_queried) : 0;
+  const answered = Number.isFinite(deps_answered) ? Number(deps_answered) : 0;
 
   let ratio = null;
   if (resolved !== null && resolved > 0) {
-    ratio = Math.min(1, Number((queried / resolved).toFixed(4)));
+    ratio = Math.min(1, Number((answered / resolved).toFixed(4)));
   }
 
   return {
@@ -45,13 +47,15 @@ export function assessCoverage({
     deps_declared: declared,
     deps_resolved: resolved,
     deps_queried: queried,
+    deps_answered: answered,
     ratio,
     transitive: Boolean(transitive),
   };
 }
 
 /**
- * Évalue la porte I6 de complétude et retourne le plafond de verdict (`cap`).
+ * Évalue la porte I6/I9 de complétude et retourne le plafond de verdict (`cap`).
+ * Exige `deps_answered` (jamais inféré depuis `deps_queried`).
  */
 export function gateCompleteness(cov, cfg = DEFAULT_CFG) {
   const effectiveCfg = { ...DEFAULT_CFG, ...(cfg || {}) };
@@ -66,9 +70,12 @@ export function gateCompleteness(cov, cfg = DEFAULT_CFG) {
     return { gate: 'RESOLVED_UNKNOWN', cap: 'INDETERMINATE' };
   }
 
-  const ratio = Number.isFinite(cov.ratio)
-    ? cov.ratio
-    : cov.deps_queried / cov.deps_resolved;
+  const answered = Number.isFinite(cov.deps_answered) ? Number(cov.deps_answered) : 0;
+  if ((cov.deps_queried ?? 0) > 0 && answered === 0) {
+    return { gate: 'UNANSWERED_QUERIES', cap: 'INDETERMINATE' };
+  }
+
+  const ratio = answered / cov.deps_resolved;
 
   if (!Number.isFinite(ratio) || ratio < effectiveCfg.threshold) {
     return { gate: 'INCOMPLETE_QUERY', cap: 'INDETERMINATE' };
@@ -119,6 +126,7 @@ export function assessRepo({
   depsDeclared = null,
   depsResolved = null,
   depsQueried = 0,
+  depsAnswered = 0,
   cfg = DEFAULT_CFG,
 } = {}) {
   const lockfile = lockfileUsed || null;
@@ -128,6 +136,7 @@ export function assessRepo({
     deps_declared: depsDeclared,
     deps_resolved: depsResolved,
     deps_queried: depsQueried,
+    deps_answered: depsAnswered,
     transitive,
   });
   const gate = gateCompleteness(coverage, cfg);

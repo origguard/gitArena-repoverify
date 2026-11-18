@@ -97,10 +97,59 @@ function refsOf(...sources) {
  * 3) Couverture >= floor, findings non critiques => WARN.
  * 4) Couverture >= floor, aucun finding => ALLOW.
  */
+/**
+ * I9 · Inventaire borné des 12 entrées de porte & audit pessimiste.
+ * Chaque champ alimentant une décision doit avoir une provenance et un défaut pessimiste.
+ */
+export const GATE_INPUTS = Object.freeze([
+  { field: 'deps_resolved', from: 'lockfile parse', defaultVal: null, optimistic: false },
+  { field: 'deps_queried', from: 'batch send count', defaultVal: 0, optimistic: true },
+  { field: 'deps_answered', from: 'osv answered count', defaultVal: 0, optimistic: false },
+  { field: 'findings', from: 'static scan', defaultVal: null, optimistic: true },
+  { field: 'vulns', from: 'osv results', defaultVal: null, optimistic: true },
+  { field: 'lockfile_used', from: 'probe read', defaultVal: null, optimistic: false },
+  { field: 'identity_status', from: 'registry anchor', defaultVal: 'UNANCHORED', optimistic: false },
+  { field: 'scan_mode', from: 'probe outcome', defaultVal: null, optimistic: false },
+  { field: 'archived', from: 'github api', defaultVal: null, optimistic: true },
+  { field: 'license_spdx', from: 'github api', defaultVal: null, optimistic: false },
+  { field: 'coverage_gate', from: 'gateCompleteness()', defaultVal: 'INDETERMINATE', optimistic: false },
+  { field: 'truncated', from: 'git trees', defaultVal: null, optimistic: true },
+]);
+
+export function auditGateInputs(inputs = {}) {
+  const missingOrOptimistic = [];
+  if (!Number.isFinite(inputs.deps_resolved) || inputs.deps_resolved <= 0) missingOrOptimistic.push('deps_resolved');
+  if (!Number.isFinite(inputs.deps_queried) || inputs.deps_queried <= 0) missingOrOptimistic.push('deps_queried');
+  if (!Number.isFinite(inputs.deps_answered) || inputs.deps_answered <= 0) missingOrOptimistic.push('deps_answered');
+  if (!Array.isArray(inputs.findings)) missingOrOptimistic.push('findings');
+  if (!Array.isArray(inputs.vulns)) missingOrOptimistic.push('vulns');
+  if (!inputs.lockfile_used || typeof inputs.lockfile_used !== 'string') missingOrOptimistic.push('lockfile_used');
+  if (!inputs.identity_status || inputs.identity_status === 'UNANCHORED') missingOrOptimistic.push('identity_status');
+  if (!inputs.scan_mode) missingOrOptimistic.push('scan_mode');
+  if (typeof inputs.archived !== 'boolean') missingOrOptimistic.push('archived');
+  if (!inputs.license_spdx) missingOrOptimistic.push('license_spdx');
+  if (inputs.coverage_gate !== 'PASS') missingOrOptimistic.push('coverage_gate');
+  if (typeof inputs.truncated !== 'boolean') missingOrOptimistic.push('truncated');
+
+  const blocksAllow =
+    missingOrOptimistic.length > 0 ||
+    inputs.archived === true ||
+    inputs.truncated === true;
+
+  return {
+    pass: !blocksAllow,
+    cap: blocksAllow ? 'INDETERMINATE' : 'ALLOW',
+    missingOrOptimistic,
+    registry: GATE_INPUTS,
+  };
+}
+
 export function decide({ behavioral = null, osv = null, execution = null } = {}, floor = ALLOW_FLOOR) {
   const level = levelOf(behavioral, osv, execution);
   const evidenceName = EvidenceName[level];
   const evidenceRefs = refsOf(behavioral, osv, execution);
+  const findingsExplicitMissing = behavioral?.scanMode === 'STATIC' && !Array.isArray(behavioral?.findings);
+  const vulnsExplicitMissing = osv?.scanned === true && (osv.vulns === null || osv.depsAnswered === 0);
   const findings = Array.isArray(behavioral?.findings) ? behavioral.findings : [];
   const critical = findings.filter(f => f?.severity === 'CRITICAL' || f?.severity === 'critical');
   const osvCritical = osv?.scanned === true && (osv.maxSeverity === 'CRITICAL' || osv.maxSeverity === 'HIGH');
@@ -117,12 +166,15 @@ export function decide({ behavioral = null, osv = null, execution = null } = {},
     };
   }
 
-  if (level < floor) {
+  if (level < floor || findingsExplicitMissing || vulnsExplicitMissing) {
+    const miss = missingStages(level, floor, behavioral, osv);
+    if (findingsExplicitMissing) miss.push('behavioral_findings');
+    if (vulnsExplicitMissing) miss.push('osv_answered');
     return {
       ...base,
       verdict: Verdict.INDETERMINATE,
       reasons: ['insufficient_evidence'],
-      missing: missingStages(level, floor, behavioral, osv)
+      missing: [...new Set(miss)]
     };
   }
 

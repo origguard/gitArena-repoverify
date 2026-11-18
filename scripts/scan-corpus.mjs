@@ -76,6 +76,8 @@ async function fetchGitHub(url, headers, apiCounter) {
 }
 
 const isExactSemver = v => /^\d+\.\d+\.\d+([+-][0-9A-Za-z.-]+)?$/.test(String(v || '').trim());
+const isExactPEP440 = v => /^\d+(?:\.\d+)*(?:(?:a|b|rc|\.post|\.dev)\d+)*$/i.test(String(v || '').trim());
+const LOCAL_UV_SOURCE_RE = /^\s*source\s*=\s*\{\s*(editable|virtual|path)\b/im;
 
 function parseLockfileDeps(base, text) {
   const deps = [];
@@ -128,9 +130,11 @@ function parseLockfileDeps(base, text) {
     const eco = base === 'Cargo.lock' ? 'crates.io' : 'PyPI';
     const blocks = text.split(/\[\[package\]\]/i);
     for (const blk of blocks.slice(1)) {
+      if (eco === 'PyPI' && LOCAL_UV_SOURCE_RE.test(blk)) continue;
       const nm = /^name\s*=\s*"([^"]+)"/m.exec(blk);
       const vm = /^version\s*=\s*"([^"]+)"/m.exec(blk);
-      if (nm && vm && isExactSemver(vm[1])) {
+      const verOk = vm && (eco === 'PyPI' ? (isExactSemver(vm[1]) || isExactPEP440(vm[1])) : isExactSemver(vm[1]));
+      if (nm && verOk) {
         deps.push({ name: nm[1], ecosystem: eco, version: vm[1], source: base });
       }
     }
@@ -641,7 +645,7 @@ export async function resolveStage(db, { limit = 500, delayMs = 120, dryRun = fa
       if (!dryRun && canonOwner && canonName) {
         upsertRepo.run(
           d.id, canonOwner, canonName, canonical,
-          d.default_branch || 'main', d.archived ? 1 : 0, d.fork ? 1 : 0,
+          d.default_branch || 'main', typeof d.archived === 'boolean' ? (d.archived ? 1 : 0) : null, d.fork ? 1 : 0,
           d.stargazers_count || 0, d.language || null, d.license?.spdx_id ?? null,
           d.pushed_at || null, JSON.stringify(identity), now
         );
@@ -742,7 +746,7 @@ async function scanRaw(owner, name, branch) {
   return {
     blobs,
     skipped,
-    truncated: false,
+    truncated: null,
     scope: found.length === 0 ? 'no_manifest_found' : 'raw_manifests',
     manifestProbe: {
       probed: ALL_TARGETS,
@@ -1005,8 +1009,8 @@ export async function osvStage(db, { limit = 500, dryRun = false, force = false,
   const insertOsv = db.prepare(`
     INSERT INTO osv_queries (
       owner, name, full_name, ecosystem, packages, vulns_json, queried_at, ref, status,
-      deps_declared, deps_resolved, deps_queried, lockfile_used, coverage_gate
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      deps_declared, deps_resolved, deps_queried, deps_answered, lockfile_used, coverage_gate
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   for (const r of repos) {
@@ -1053,12 +1057,13 @@ export async function osvStage(db, { limit = 500, dryRun = false, force = false,
         depsDeclared,
         depsResolved,
         depsQueried: 0,
+        depsAnswered: 0,
       });
       if (!dryRun) {
         const ref = `osv:${r.full_name}:none:${Date.now()}:${fact.id}`;
         insertOsv.run(
           r.owner, r.name, r.full_name, primaryEcosystem || 'none', 0, '[]', now, ref, 'no_pinned_deps',
-          depsDeclared, depsResolved, 0, lockfileUsed, comp.gate.gate
+          depsDeclared, depsResolved, 0, 0, lockfileUsed, comp.gate.gate
         );
       }
       recordAttrition(db, {
@@ -1077,6 +1082,7 @@ export async function osvStage(db, { limit = 500, dryRun = false, force = false,
     try {
       const allVulns = [];
       let queriedCount = 0;
+      let answeredCount = 0;
       let anyQueried = false;
       for (let off = 0; off < deps.length; off += 60) {
         const chunk = deps.slice(off, off + 60);
@@ -1117,7 +1123,7 @@ export async function osvStage(db, { limit = 500, dryRun = false, force = false,
             insertOsv.run(
               r.owner, r.name, r.full_name, deps[0].ecosystem, deps.length, '[]', now,
               `osv:${r.full_name}:err:${Date.now()}:${fact.id}`, 'error',
-              depsDeclared, depsResolved, queriedCount, lockfileUsed, 'INCOMPLETE_QUERY'
+              depsDeclared, depsResolved, queriedCount, answeredCount, lockfileUsed, 'INCOMPLETE_QUERY'
             );
           }
           anyQueried = false;
@@ -1126,9 +1132,12 @@ export async function osvStage(db, { limit = 500, dryRun = false, force = false,
         anyQueried = true;
         queriedCount += chunk.length;
         const j = await res.json();
-        for (let i = 0; i < (j.results || []).length; i++) {
-          const item = j.results[i];
-          if (Array.isArray(item.vulns)) {
+        const resArr = Array.isArray(j.results) ? j.results : [];
+        const chunkAnswered = Math.min(chunk.length, resArr.filter(it => it && typeof it === 'object').length);
+        answeredCount += chunkAnswered;
+        for (let i = 0; i < resArr.length && i < chunk.length; i++) {
+          const item = resArr[i];
+          if (Array.isArray(item?.vulns)) {
             for (const v of item.vulns) {
               allVulns.push({ id: v.id, package: chunk[i].name, version: chunk[i].version, ecosystem: chunk[i].ecosystem, modified: v.modified || null });
             }
@@ -1144,12 +1153,13 @@ export async function osvStage(db, { limit = 500, dryRun = false, force = false,
           depsDeclared,
           depsResolved,
           depsQueried: queriedCount,
+          depsAnswered: answeredCount,
         });
         if (!dryRun) {
           const ref = `osv:${r.full_name}:${fact.id}:${Date.now()}`;
           insertOsv.run(
             r.owner, r.name, r.full_name, deps[0].ecosystem, deps.length, JSON.stringify(filteredVulns), now, ref, 'queried',
-            comp.coverage.deps_declared, comp.coverage.deps_resolved, comp.coverage.deps_queried,
+            comp.coverage.deps_declared, comp.coverage.deps_resolved, comp.coverage.deps_queried, comp.coverage.deps_answered,
             comp.coverage.lockfile, comp.gate.gate
           );
         }

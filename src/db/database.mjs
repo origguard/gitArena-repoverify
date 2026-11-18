@@ -99,6 +99,9 @@ export function initDatabase(dbPath = null) {
   if (!osvCols.includes('deps_queried')) {
     db.exec('ALTER TABLE osv_queries ADD COLUMN deps_queried INTEGER;');
   }
+  if (!osvCols.includes('deps_answered')) {
+    db.exec('ALTER TABLE osv_queries ADD COLUMN deps_answered INTEGER DEFAULT 0;');
+  }
   if (!osvCols.includes('lockfile_used')) {
     db.exec('ALTER TABLE osv_queries ADD COLUMN lockfile_used TEXT;');
   }

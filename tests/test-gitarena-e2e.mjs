@@ -22,13 +22,13 @@ import {
   verifyIntegritySignature,
   getHonestCensus
 } from '../src/engines/integrity-registry.mjs';
-import { Evidence, decide, isSignable, computeCanonicalFingerprint, evaluatePolicyAction } from '../src/engines/evidence.mjs';
+import { Evidence, GATE_INPUTS, decide, isSignable, computeCanonicalFingerprint, evaluatePolicyAction, auditGateInputs } from '../src/engines/evidence.mjs';
 import { buildTree, inclusionProof, verifyProof, leafHash, nodeHash } from '../src/engines/merkle.mjs';
 import { badgeState, revokeKeyId } from '../src/engines/revocation.mjs';
 import { dedupe } from '../src/engines/corpus-audit.mjs';
 import { executionVerdict } from '../src/engines/recipes.mjs';
 import { evaluateGolden } from './golden-eval.mjs';
-import { extractDeps, computeCensus, evaluateIdentity } from '../scripts/scan-corpus.mjs';
+import { extractDeps, extractDepsWithCoverage, computeCensus, evaluateIdentity } from '../scripts/scan-corpus.mjs';
 import { assessCoverage, gateCompleteness, applyCap, visibleAdvisories, assessRepo, decomposeReasons, checkBand } from '../src/engines/completeness.mjs';
 import { cleanGitUrl, expectedUpstream, identityVerdict, buildIdentityScope } from '../src/engines/identity-anchor.mjs';
 import { locateLockfiles, readLocks, blockCause, scopeStatement, ECO_LOCKS } from '../src/engines/probe-depth.mjs';
@@ -47,7 +47,7 @@ async function runE2eHarness() {
   console.log('======================================================\n');
 
   let passedTests = 0;
-  const totalTests = 29;
+  const totalTests = 30;
 
   // TEST-01 : Schéma & Persistance SQLite WAL
   console.log('[TEST-01] Vérification du Schéma & Mode WAL SQLite...');
@@ -812,11 +812,11 @@ async function runE2eHarness() {
   assert.equal(gateCompleteness(covNoLock).cap, 'INDETERMINATE');
   assert.equal(applyCap('ALLOW', gateCompleteness(covNoLock).cap), 'INDETERMINATE');
 
-  const covPartial = assessCoverage({ lockfile: 'Cargo.lock', deps_declared: 10, deps_resolved: 1010, deps_queried: 10, transitive: true });
+  const covPartial = assessCoverage({ lockfile: 'Cargo.lock', deps_declared: 10, deps_resolved: 1010, deps_queried: 10, deps_answered: 10, transitive: true });
   assert.equal(gateCompleteness(covPartial).gate, 'INCOMPLETE_QUERY');
   assert.equal(gateCompleteness(covPartial).cap, 'INDETERMINATE');
 
-  const covPass = assessRepo({ lockfileUsed: 'uv.lock', depsDeclared: 14, depsResolved: 168, depsQueried: 168 });
+  const covPass = assessRepo({ lockfileUsed: 'uv.lock', depsDeclared: 14, depsResolved: 168, depsQueried: 168, depsAnswered: 168 });
   assert.equal(covPass.gate.gate, 'PASS');
   assert.equal(covPass.gate.cap, 'ALLOW');
   assert.equal(applyCap('ALLOW', covPass.gate.cap), 'ALLOW');
@@ -951,6 +951,44 @@ async function runE2eHarness() {
   closeDatabase();
 
   console.log(`  ✓ TEST-29 Validé : Probe Depth, I7 exact (${realCensus.passBreakdown.blockedFindingsOnly}+${realCensus.passBreakdown.blockedAdvisoriesOnly}+${realCensus.passBreakdown.blockedBoth}+${realCensus.passBreakdown.verifiedAsResolved}=${realCensus.passBreakdown.passCoverage}), Tiers A=${realCensus.verifiedAsResolved}/B=${realCensus.verifiedAsNamed}, Scope & I8 conformes.`);
+  passedTests++;
+
+  // TEST-30 : I9 — Audit des 12 entrées de porte, défauts pessimistes, deps_answered & PEP 440
+  console.log('[TEST-30] Vérification I9 (Audit 12 entrées, défauts pessimistes & PEP 440)...');
+  assert.equal(GATE_INPUTS.length, 12);
+  const fullCleanInputs = {
+    deps_resolved: 181, deps_queried: 181, deps_answered: 181,
+    findings: [], vulns: [], lockfile_used: 'uv.lock',
+    identity_status: 'CANONICAL_MATCH', scan_mode: 'STATIC',
+    archived: false, license_spdx: 'Apache-2.0', coverage_gate: 'PASS',
+    truncated: false,
+  };
+  assert.equal(auditGateInputs(fullCleanInputs).pass, true);
+  assert.equal(auditGateInputs(fullCleanInputs).cap, 'ALLOW');
+
+  for (const field of ['deps_answered', 'findings', 'vulns', 'archived', 'truncated', 'lockfile_used']) {
+    const mutated = { ...fullCleanInputs, [field]: field === 'deps_answered' ? 0 : null };
+    const res = auditGateInputs(mutated);
+    assert.equal(res.pass, false, `Entrée optimiste/nulle ${field} ne doit jamais passer I9`);
+    assert.equal(res.cap, 'INDETERMINATE');
+  }
+  assert.equal(gateCompleteness({ lockfile: 'uv.lock', deps_resolved: 181, deps_queried: 181, deps_answered: 0, transitive: true }).gate, 'UNANSWERED_QUERIES');
+  assert.equal(decide({ behavioral: { scanMode: 'STATIC', ref: 'behavioral_facts:1', findings: null }, osv: { scanned: true, ref: 'osv:1', maxSeverity: 'NONE' } }).verdict, 'INDETERMINATE');
+  assert.equal(decide({ behavioral: { scanMode: 'STATIC', ref: 'behavioral_facts:1', findings: [] }, osv: { scanned: true, ref: 'osv:1', vulns: null, depsAnswered: 0, maxSeverity: 'NONE' } }).verdict, 'INDETERMINATE');
+
+  const uvSample = [
+    '[[package]]', 'name = "pr-agent"', 'version = "0.49.0"', 'source = { editable = "." }',
+    '[[package]]', 'name = "idna"', 'version = "3.18"', 'source = { registry = "https://pypi.org/simple" }',
+    '[[package]]', 'name = "python-dateutil"', 'version = "2.9.0.post0"', 'source = { registry = "https://pypi.org/simple" }',
+    '[[package]]', 'name = "pywin32"', 'version = "312"', 'source = { registry = "https://pypi.org/simple" }',
+  ].join('\n');
+  const uvParsed = extractDepsWithCoverage({ 'uv.lock': uvSample });
+  assert.equal(uvParsed.depsResolved, 3);
+  assert.ok(uvParsed.deps.some(d => d.name === 'idna' && d.version === '3.18'));
+  assert.ok(uvParsed.deps.some(d => d.name === 'python-dateutil' && d.version === '2.9.0.post0'));
+  assert.ok(uvParsed.deps.some(d => d.name === 'pywin32' && d.version === '312'));
+  assert.equal(uvParsed.deps.some(d => d.name === 'pr-agent'), false);
+  console.log('  ✓ TEST-30 Validé : I9 (12 entrées, défauts pessimistes, deps_answered & PEP 440) conforme.');
   passedTests++;
 
   console.log('\n======================================================');

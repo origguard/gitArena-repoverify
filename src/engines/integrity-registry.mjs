@@ -135,17 +135,17 @@ export function getCachedBehaviorOrAnalyze(ownerOrFullName, maybeName = null) {
     `).get(String(owner || ''), String(name || ''));
 
     if (!row) {
-      return { scanMode: null, scanScope: null, findings: [], ref: null, scannedAt: null };
+      return { scanMode: null, scanScope: null, findings: null, ref: null, scannedAt: null };
     }
     return {
       scanMode: row.scan_mode,
       scanScope: row.scan_scope || null,
-      findings: JSON.parse(row.findings_json || '[]'),
+      findings: row.findings_json ? JSON.parse(row.findings_json) : null,
       ref: row.ref || `behavioral_facts:${row.id}`,
       scannedAt: row.scanned_at
     };
   } catch {
-    return { scanMode: null, scanScope: null, findings: [], ref: null, scannedAt: null };
+    return { scanMode: null, scanScope: null, findings: null, ref: null, scannedAt: null };
   }
 }
 
@@ -182,7 +182,7 @@ function getCachedOsvSummary(fullName) {
   try {
     const db = getDb();
     const osvRow = db.prepare(`
-      SELECT ref, vulns_json, status, deps_declared, deps_resolved, deps_queried, lockfile_used, coverage_gate
+      SELECT ref, vulns_json, status, deps_declared, deps_resolved, deps_queried, COALESCE(deps_answered, 0) AS deps_answered, lockfile_used, coverage_gate
       FROM osv_queries
       WHERE full_name = ? AND status = 'queried'
       ORDER BY queried_at DESC, id DESC
@@ -196,13 +196,13 @@ function getCachedOsvSummary(fullName) {
         deps_declared: osvRow.deps_declared,
         deps_resolved: osvRow.deps_resolved,
         deps_queried: osvRow.deps_queried ?? 0,
+        deps_answered: osvRow.deps_answered ?? 0,
         transitive: Boolean(osvRow.lockfile_used),
       });
-      const gateRes = osvRow.coverage_gate
-        ? { gate: osvRow.coverage_gate, cap: osvRow.coverage_gate === 'PASS' ? 'ALLOW' : (osvRow.coverage_gate === 'DIRECT_ONLY' ? 'WARN' : 'INDETERMINATE') }
-        : gateCompleteness(cov);
+      const gateRes = gateCompleteness(cov);
       return {
         scanned: true,
+        vulns,
         totalVulnerabilities: vulns.length,
         maxSeverity: vulns.length > 0 ? 'HIGH' : 'NONE',
         ref: osvRow.ref,
@@ -210,6 +210,7 @@ function getCachedOsvSummary(fullName) {
         coverageGate: gateRes.gate,
         coverageCap: gateRes.cap,
         lockfileUsed: osvRow.lockfile_used || null,
+        depsAnswered: cov.deps_answered,
       };
     }
 
