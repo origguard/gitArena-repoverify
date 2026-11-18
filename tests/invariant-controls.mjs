@@ -37,6 +37,12 @@ const merkleBuild = await tryImport(
   ['../src/engines/merkle.mjs'], m => m.buildTree);
 const merkleProof = await tryImport(
   ['../src/engines/merkle.mjs'], m => m.inclusionProof);
+const gateCompleteness = await tryImport(
+  ['../src/engines/completeness.mjs'], m => m.gateCompleteness);
+const visibleAdvisories = await tryImport(
+  ['../src/engines/completeness.mjs'], m => m.visibleAdvisories);
+const identityVerdict = await tryImport(
+  ['../src/engines/identity-anchor.mjs'], m => m.identityVerdict);
 
 const db = initDatabase();
 
@@ -223,6 +229,40 @@ const CONTROLS = [
       const mutant = () => ({ valid: true });
       return verdict(probe(merkleVerify), probe(mutant));
     } },
+  { id: 'C-13', inv: 'I6 · complétude', defect: 'gate PASS quand 10/1010 deps interrogées',
+    run: () => {
+      if (!gateCompleteness) return 'NON_INSTRUMENTÉ';
+      const cfg = { enabled: true, threshold: 0.98, requireTransitive: true };
+      const probe = g => g({ lockfile: 'Cargo.lock', deps_declared: 10, deps_resolved: 1010, deps_queried: 10, transitive: true }, cfg).gate !== 'PASS';
+      const mutant = () => ({ gate: 'PASS', cap: 'ALLOW' });
+      return verdict(probe(gateCompleteness), probe(mutant));
+    } },
+  { id: 'C-14', inv: 'I6 · lockfile', defect: 'ALLOW sans lockfile',
+    run: () => {
+      if (!gateCompleteness) return 'NON_INSTRUMENTÉ';
+      const cfg = { enabled: true, threshold: 0.98, requireTransitive: true };
+      const probe = g => g({ lockfile: null, deps_declared: 5, deps_resolved: null, deps_queried: 5, transitive: false }, cfg).cap !== 'ALLOW';
+      const mutant = () => ({ gate: 'PASS', cap: 'ALLOW' });
+      return verdict(probe(gateCompleteness), probe(mutant));
+    } },
+  { id: 'C-15', inv: 'I6 · visibilité', defect: 'avis OSV sur paquet hors-périmètre retenu',
+    run: () => {
+      if (!visibleAdvisories) return 'NON_INSTRUMENTÉ';
+      const advisories = [
+        { id: 'RUSTSEC-X', package: 'bincode' },
+        { id: 'GHSA-Y', package: 'pillow' },
+      ];
+      const probe = fn => fn(advisories, ['serde', 'tokio']).length === 0;
+      const mutant = a => a;
+      return verdict(probe(visibleAdvisories), probe(mutant));
+    } },
+  { id: 'C-16', inv: 'identité', defect: 'CANONICAL_MATCH sans ancre upstream indépendante',
+    run: () => {
+      if (!identityVerdict) return 'NON_INSTRUMENTÉ';
+      const probe = fn => fn({ url: null }, { slug: 'a/b', id: 1 }).status === 'UNANCHORED';
+      const mutant = () => ({ status: 'CANONICAL_MATCH', match: true });
+      return verdict(probe(identityVerdict), probe(mutant));
+    } },
 ];
 
 function verdict(cleanPass, mutantPass) {
@@ -231,8 +271,12 @@ function verdict(cleanPass, mutantPass) {
   return 'PROBANT';
 }
 
+const onlyArg = process.argv.find(a => a.startsWith('--only='));
+const onlyIds = onlyArg ? new Set(onlyArg.slice(7).split(',').map(s => s.trim()).filter(Boolean)) : null;
+const selectedControls = onlyIds ? CONTROLS.filter(c => onlyIds.has(c.id)) : CONTROLS;
+
 const rows = [];
-for (const c of CONTROLS) {
+for (const c of selectedControls) {
   let r; try { r = c.run(); } catch (e) { r = 'ÉCHEC'; c.error = e.message; }
   rows.push({ ...c, result: r });
 }
