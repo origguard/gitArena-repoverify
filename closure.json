@@ -1,0 +1,185 @@
+{
+  "document": "closure",
+  "version": "final-1.0.0",
+  "closes": "I10 · réconciliation du dénominateur",
+  "generated": "2026-11-18T03:38:00.732Z",
+  "instrument": {
+    "closed": true,
+    "controls": {
+      "total": 30,
+      "prior": 25,
+      "added": 5,
+      "results": [
+        {
+          "id": "C-26",
+          "inv": "I10 · dénominateur",
+          "result": "PROBANT"
+        },
+        {
+          "id": "C-27",
+          "inv": "I10 · PEP 440",
+          "result": "PROBANT"
+        },
+        {
+          "id": "C-28",
+          "inv": "I10 · sources locales",
+          "result": "PROBANT"
+        },
+        {
+          "id": "C-29",
+          "inv": "I10 · format illisible",
+          "result": "PROBANT"
+        },
+        {
+          "id": "C-30",
+          "inv": "I10 · plafond appliqué",
+          "result": "PROBANT"
+        }
+      ]
+    },
+    "fixtures": [
+      {
+        "id": "F-01",
+        "label": "uv.lock observé · 182 blocs, 1 editable, 181 externes",
+        "pass": true
+      },
+      {
+        "id": "F-02",
+        "label": "uv.lock sans PEP 440 · le parseur semver en droppe 14",
+        "pass": true
+      },
+      {
+        "id": "F-03",
+        "label": "Cargo.lock · membre workspace sans source = local",
+        "pass": true
+      },
+      {
+        "id": "F-04",
+        "label": "package-lock v3 · racine + link + file: exclus",
+        "pass": true
+      },
+      {
+        "id": "F-05",
+        "label": "pnpm v9 · resolution directory = local",
+        "pass": true
+      },
+      {
+        "id": "F-06",
+        "label": "go.sum · déduplication /go.mod, pseudo-version acceptée",
+        "pass": true
+      },
+      {
+        "id": "F-07",
+        "label": "bun.lockb · binaire → FORMAT_UNPARSEABLE, jamais zéro",
+        "pass": true
+      },
+      {
+        "id": "F-08",
+        "label": "JSON corrompu → structure non reconnue, pas zéro",
+        "pass": true
+      }
+    ],
+    "e2e_prior": 30,
+    "tables_prior": 24
+  },
+  "census": {
+    "inputs": 485,
+    "attempted": 33,
+    "unattempted": 452,
+    "ghosts": 2,
+    "resolved": 31,
+    "static": 31,
+    "osv": 25,
+    "pass": 21,
+    "verifiedAsResolved": 1,
+    "verifiedAsNamed": 1,
+    "breakdown": {
+      "findingsOnly": 0,
+      "advisoriesOnly": 13,
+      "both": 7,
+      "verified": 1
+    },
+    "exactSum": true
+  },
+  "published_claim": "Sur 485 entrées revendiquées, 33 ont été examinées. 2 fantômes confirmés (404), 31 résolus par id canonique, 31 scannés sur leurs manifestes et lockfiles, 25 interrogés contre OSV, 21 satisfont la couverture transitive complète. 1 dépôt satisfait la chaîne entière : 181 dépendances externes résolues depuis uv.lock, 181 interrogées, 181 répondues, aucun finding statique, aucun avis OSV, ancre registre concordante. Le mécanisme de requête est validé par témoin positif (requests 2.19.0 → 10 avis). 452 entrées ne sont pas encore examinées. Le code source n'a pas été lu.",
+  "out_of_scope": [
+    "Exécution isolée du code : docker absent, aucun eBPF, aucun strace, aucun cold-start.",
+    "Lecture du code source : seuls manifestes et lockfiles ont été lus.",
+    "Analyse comportementale distincte : blockedFindingsOnly = 0 sur ce corpus.",
+    "Chaîne de titre : la titularité des droits concédés n'est pas attestée.",
+    "Licéité de l'acquisition initiale des données : non attestée.",
+    "Brevets, contrôle export, marques : hors périmètre.",
+    "Base légale d'un usage (TDM, RGPD) : aucune licence ne la déduit.",
+    "Identité amont : l'ancre registre est déclarative, CANONICAL_MATCH ≠ projet attendu.",
+    "Horodatage RFC 3161 et journal append-only public : absents. Le mot « attestation » reste proscrit.",
+    "Taux d'erreur sur jeu annoté de 500 dépôts : absent. Aucun chiffre de fiabilité publiable."
+  ],
+  "transferable_assets": [
+    "GATE_INPUTS + auditGateInputs : défaut pessimiste exigé sur chaque entrée de porte.",
+    "Contrôles négatifs avec mutant, baseline rouge en commit séparé (C-01..C-30).",
+    "I6 complétude : ratio sur fermeture transitive, lockfile exigé pour ALLOW.",
+    "I7 décomposition exacte : aucune chute anonyme, somme = passCoverage.",
+    "I8 bande de sanity : sortie hors bande → HOLD_suspect_gate, pas publication.",
+    "I9 interrogé ≠ répondu : deps_answered distinct de deps_queried.",
+    "I10 dénominateur indépendant : comptage structurel du fichier, pas du parseur.",
+    "Origine des causes : probe vs repo, une limite d'examen n'est pas une propriété."
+  ],
+  "defect_ledger": [
+    {
+      "phase": "I",
+      "defect": "fail-open composé L70/L146",
+      "direction": "sur-affirmation",
+      "severity": "catastrophique"
+    },
+    {
+      "phase": "II",
+      "defect": "hash figé, clé dans le dépôt, vocabulaire",
+      "direction": "sur-affirmation",
+      "severity": "élevée"
+    },
+    {
+      "phase": "III",
+      "defect": "faux ALLOW sur manifestes partiels",
+      "direction": "sur-affirmation",
+      "severity": "catastrophique"
+    },
+    {
+      "phase": "V",
+      "defect": "plafond de sonde 2 Mo vs 2 240 125 octets",
+      "direction": "sous-affirmation",
+      "severity": "modérée"
+    },
+    {
+      "phase": "I9",
+      "defect": "deps_queried compté comme répondu",
+      "direction": "sur-affirmation",
+      "severity": "élevée"
+    },
+    {
+      "phase": "I10",
+      "defect": "dénominateur dérivé du parseur (PEP 440)",
+      "direction": "sur-affirmation",
+      "severity": "catastrophique"
+    }
+  ],
+  "bias": {
+    "over_claiming": 5,
+    "under_claiming": 1,
+    "conclusion": "Six défauts, cinq vers la sur-affirmation. Biais structurel, corrigé en rendant pessimiste chaque entrée de porte, pas une instance de plus."
+  },
+  "hardening_stopped": true,
+  "next_action": {
+    "blocker": "HAS_GITHUB_TOKEN=false",
+    "not_engineering": true,
+    "command": "node scripts/scan-corpus.mjs --limit=500 --cohort=2026-11-18-full --expect-band=5:40",
+    "anonymous_hours": 113,
+    "authenticated_hours": 1.4,
+    "band": {
+      "lo": 5,
+      "hi": 40
+    },
+    "expected_verified": 14,
+    "on_band_violation": "HOLD_suspect_gate — suspecter une porte ouverte, pas se réjouir"
+  },
+  "fingerprint": "f0f204c4840b6764ed927e39eca41264371cfdc01b0d3d34cdf84e5ed68ff8a1"
+}

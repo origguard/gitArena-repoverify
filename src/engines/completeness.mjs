@@ -91,9 +91,31 @@ export function gateCompleteness(cov, cfg = DEFAULT_CFG) {
  * Plafonne un verdict de base selon `cap` (monotonie stricte vers le bas).
  */
 export function applyCap(baseVerdict, cap) {
+  if (cap == null) return baseVerdict;
   const baseIdx = CAP[baseVerdict] ?? CAP.INDETERMINATE;
   const capIdx = CAP[cap] ?? CAP.INDETERMINATE;
   return CAP_NAME[Math.min(baseIdx, capIdx)];
+}
+
+/**
+ * I10 · Réconciliation indépendante du dénominateur sur un lockfile lu structurellement.
+ */
+export function reconcileDenominator(reading) {
+  if (!reading || !reading.parseable) {
+    return { gate: 'FORMAT_UNPARSEABLE', cap: 'INDETERMINATE', origin: 'probe', reason: reading?.reason || 'unparseable', delta: null };
+  }
+  if (reading.accepted !== reading.expected) {
+    return {
+      gate: 'DENOMINATOR_UNRECONCILED',
+      cap: 'INDETERMINATE',
+      origin: 'probe',
+      reason: 'parser_dropped_entries',
+      delta: reading.expected - reading.accepted,
+      observed: { raw: reading.raw, locals: reading.locals, expected: reading.expected, accepted: reading.accepted },
+      dropped: reading.dropped || [],
+    };
+  }
+  return { gate: 'RECONCILED', cap: null, origin: null, reason: null, delta: 0 };
 }
 
 /**

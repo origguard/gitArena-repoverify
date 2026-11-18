@@ -29,6 +29,7 @@ import { dedupe } from '../src/engines/corpus-audit.mjs';
 import { executionVerdict } from '../src/engines/recipes.mjs';
 import { evaluateGolden } from './golden-eval.mjs';
 import { extractDeps, extractDepsWithCoverage, computeCensus, evaluateIdentity } from '../scripts/scan-corpus.mjs';
+import { readLockfile, reconcileDenominator, gateCoverageFull, SUPPORTED } from '../final-correction.mjs';
 import { assessCoverage, gateCompleteness, applyCap, visibleAdvisories, assessRepo, decomposeReasons, checkBand } from '../src/engines/completeness.mjs';
 import { cleanGitUrl, expectedUpstream, identityVerdict, buildIdentityScope } from '../src/engines/identity-anchor.mjs';
 import { locateLockfiles, readLocks, blockCause, scopeStatement, ECO_LOCKS } from '../src/engines/probe-depth.mjs';
@@ -47,7 +48,7 @@ async function runE2eHarness() {
   console.log('======================================================\n');
 
   let passedTests = 0;
-  const totalTests = 30;
+  const totalTests = 31;
 
   // TEST-01 : Schéma & Persistance SQLite WAL
   console.log('[TEST-01] Vérification du Schéma & Mode WAL SQLite...');
@@ -584,6 +585,7 @@ async function runE2eHarness() {
     'src/studio/benchmark-publisher.mjs',
     'src/studio/gif-encoder.mjs',
     'scripts/scan-corpus.mjs',
+    'final-correction.mjs',
     'tests/golden-eval.mjs'
   ];
 
@@ -752,7 +754,7 @@ async function runE2eHarness() {
     'package-lock.json': JSON.stringify({ packages: { 'node_modules/locked-npm': { version: '2.4.1' } } }),
     'requirements.txt': 'fastapi==0.115.0\nrequests>=2.31.0\n',
     'Cargo.toml': '[dependencies]\nranged_crate = "0.3"\nexact_crate = "1.0.210"\n',
-    'Cargo.lock': '[[package]]\nname = "futures"\nversion = "0.3.30"\n',
+    'Cargo.lock': '[[package]]\nname = "futures"\nversion = "0.3.30"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n',
     'uv.lock': '[[package]]\nname = "uvicorn"\nversion = "0.32.1"\n',
     'go.mod': 'require (\n\tgithub.com/gin-gonic/gin v1.10.0\n)\n'
   });
@@ -989,6 +991,38 @@ async function runE2eHarness() {
   assert.ok(uvParsed.deps.some(d => d.name === 'pywin32' && d.version === '312'));
   assert.equal(uvParsed.deps.some(d => d.name === 'pr-agent'), false);
   console.log('  ✓ TEST-30 Validé : I9 (12 entrées, défauts pessimistes, deps_answered & PEP 440) conforme.');
+  passedTests++;
+
+  // TEST-31 : I10 — Réconciliation indépendante du dénominateur sur 14 formats
+  console.log('[TEST-31] Vérification I10 (Réconciliation dénominateur structurel & 14 formats)...');
+  assert.equal(SUPPORTED.length, 14);
+  const pnpmReal = [
+    "lockfileVersion: '9.0'",
+    'importers:',
+    '  .: {}',
+    'packages:',
+    "  '@scope/pkg@1.2.3': {}",
+    "  'local-lib@file:packages/local-lib':",
+    '    resolution: {type: directory, directory: packages/local-lib}',
+    'snapshots:',
+    "  '@scope/pkg@1.2.3(react@18.3.1)': {}",
+  ].join('\n');
+  const pnpmRead = readLockfile('pnpm-lock.yaml', pnpmReal);
+  assert.equal(pnpmRead.raw, 2);
+  assert.equal(pnpmRead.locals, 1);
+  assert.equal(pnpmRead.expected, 1);
+  assert.equal(pnpmRead.accepted, 1);
+  assert.equal(reconcileDenominator(pnpmRead).gate, 'RECONCILED');
+
+  const binRead = readLockfile('bun.lockb', '\x00\x01binary');
+  assert.equal(binRead.parseable, false);
+  assert.equal(reconcileDenominator(binRead).gate, 'FORMAT_UNPARSEABLE');
+  assert.equal(gateCoverageFull({ reading: binRead, reconciliation: reconcileDenominator(binRead), depsAnswered: 0 }).gate, 'FORMAT_UNPARSEABLE');
+
+  const covPnpm = extractDepsWithCoverage({ 'pnpm-lock.yaml': pnpmReal });
+  assert.equal(covPnpm.depsResolved, 1);
+  assert.equal(covPnpm.reconciliation.gate, 'RECONCILED');
+  console.log('  ✓ TEST-31 Validé : I10 (14 formats, pnpm v9 + pairs, local file:/directory, FORMAT_UNPARSEABLE) conforme.');
   passedTests++;
 
   console.log('\n======================================================');

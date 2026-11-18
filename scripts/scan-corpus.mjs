@@ -19,6 +19,7 @@ import {
   blockCause,
   scopeStatement
 } from '../src/engines/probe-depth.mjs';
+import { readLockfile, reconcileDenominator, UNPARSEABLE_FORMATS } from '../final-correction.mjs';
 
 const SCANNER_VERSION = 'scanner_v0.8';
 
@@ -286,19 +287,36 @@ export function countDeclaredDeps(blobs = {}) {
 }
 
 /**
- * Extrait les dépendances avec priorité lockfile ET calcule les métriques de couverture I6.
+ * Extrait les dépendances avec priorité lockfile ET calcule les métriques de couverture I6/I10.
+ * Le dénominateur `depsResolved` provient du comptage structurel du fichier (jamais du parseur seul).
  */
 export function extractDepsWithCoverage(blobs = {}) {
   const lockDepsByEco = new Map();
   const manifestDepsByEco = new Map();
+  const lockReadings = [];
 
   for (const [file, text] of Object.entries(blobs || {})) {
     if (typeof text !== 'string') continue;
     const base = file.split('/').pop();
-    if (LOCKFILES_SET.has(base)) {
-      for (const d of parseLockfileDeps(base, text)) {
-        if (!lockDepsByEco.has(d.ecosystem)) lockDepsByEco.set(d.ecosystem, []);
-        lockDepsByEco.get(d.ecosystem).push(d);
+    if (LOCKFILES_SET.has(base) || UNPARSEABLE_FORMATS.has(base)) {
+      const reading = readLockfile(base, text);
+      const rec = reconcileDenominator(reading);
+      lockReadings.push({ file, base, reading, reconciliation: rec });
+      if (reading.parseable && reading.ecosystem && reading.acceptedEntries?.length) {
+        if (!lockDepsByEco.has(reading.ecosystem)) lockDepsByEco.set(reading.ecosystem, []);
+        for (const e of reading.acceptedEntries) {
+          lockDepsByEco.get(reading.ecosystem).push({
+            name: e.name,
+            ecosystem: reading.ecosystem,
+            version: e.version,
+            source: base,
+          });
+        }
+      } else if (!reading.parseable) {
+        for (const d of parseLockfileDeps(base, text)) {
+          if (!lockDepsByEco.has(d.ecosystem)) lockDepsByEco.set(d.ecosystem, []);
+          lockDepsByEco.get(d.ecosystem).push(d);
+        }
       }
     } else if (MANIFESTS.includes(base)) {
       for (const d of parseManifestDeps(base, text)) {
@@ -331,7 +349,14 @@ export function extractDepsWithCoverage(blobs = {}) {
   }
   const deps = [...deduped.values()];
   const depsDeclared = countDeclaredDeps(blobs);
-  const depsResolved = lockfileUsed ? deps.length : null;
+
+  // I10 : dénominateur structurel indépendant du parseur de version
+  const lockIssues = lockReadings.filter(lr => lr.reconciliation.gate !== 'RECONCILED');
+  const firstUnreconciled = lockIssues[0]?.reconciliation || null;
+  const structuralResolved = lockReadings.reduce((acc, lr) => acc + (lr.reading.expected ?? 0), 0);
+  const depsResolved = lockfileUsed
+    ? (structuralResolved > 0 ? structuralResolved : deps.length)
+    : (lockIssues.length > 0 ? null : null);
 
   return {
     deps,
@@ -339,6 +364,7 @@ export function extractDepsWithCoverage(blobs = {}) {
     primaryEcosystem: primaryEcosystem || (deps[0]?.ecosystem ?? null),
     depsDeclared,
     depsResolved,
+    reconciliation: firstUnreconciled || (lockReadings.length > 0 ? { gate: 'RECONCILED', cap: null, delta: 0 } : null),
   };
 }
 
@@ -1047,7 +1073,7 @@ export async function osvStage(db, { limit = 500, dryRun = false, force = false,
 
     await anchorRepoIdentity(db, r, blobs || {}, { dryRun, skipAnchor });
 
-    const { deps, lockfileUsed, primaryEcosystem, depsDeclared, depsResolved } = extractDepsWithCoverage(blobs || {});
+    const { deps, lockfileUsed, primaryEcosystem, depsDeclared, depsResolved, reconciliation } = extractDepsWithCoverage(blobs || {});
     const now = new Date().toISOString();
 
     if (deps.length === 0) {
@@ -1059,11 +1085,12 @@ export async function osvStage(db, { limit = 500, dryRun = false, force = false,
         depsQueried: 0,
         depsAnswered: 0,
       });
+      const gateName = (reconciliation && reconciliation.gate !== 'RECONCILED') ? reconciliation.gate : comp.gate.gate;
       if (!dryRun) {
         const ref = `osv:${r.full_name}:none:${Date.now()}:${fact.id}`;
         insertOsv.run(
           r.owner, r.name, r.full_name, primaryEcosystem || 'none', 0, '[]', now, ref, 'no_pinned_deps',
-          depsDeclared, depsResolved, 0, 0, lockfileUsed, comp.gate.gate
+          depsDeclared, depsResolved, 0, 0, lockfileUsed, gateName
         );
       }
       recordAttrition(db, {
@@ -1155,16 +1182,17 @@ export async function osvStage(db, { limit = 500, dryRun = false, force = false,
           depsQueried: queriedCount,
           depsAnswered: answeredCount,
         });
+        const gateName = (reconciliation && reconciliation.gate !== 'RECONCILED') ? reconciliation.gate : comp.gate.gate;
         if (!dryRun) {
           const ref = `osv:${r.full_name}:${fact.id}:${Date.now()}`;
           insertOsv.run(
             r.owner, r.name, r.full_name, deps[0].ecosystem, deps.length, JSON.stringify(filteredVulns), now, ref, 'queried',
             comp.coverage.deps_declared, comp.coverage.deps_resolved, comp.coverage.deps_queried, comp.coverage.deps_answered,
-            comp.coverage.lockfile, comp.gate.gate
+            comp.coverage.lockfile, gateName
           );
         }
         osvOk++;
-        if (comp.gate.gate === 'PASS') coveragePass++;
+        if (gateName === 'PASS') coveragePass++;
         else {
           recordAttrition(db, {
             dryRun,
@@ -1173,7 +1201,7 @@ export async function osvStage(db, { limit = 500, dryRun = false, force = false,
             input: r.full_name,
             fromStage: 'osv',
             toStage: 'verified',
-            reason: `coverage_gate_${comp.gate.gate}`,
+            reason: `coverage_gate_${gateName}`,
             failures
           });
         }
