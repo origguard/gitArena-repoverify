@@ -810,17 +810,18 @@ export const CENSUS = Object.freeze({
 export const PUBLISHED_CLAIM =
   "Sur 485 entrées revendiquées, 33 ont été examinées. 2 fantômes confirmés (404), " +
   "31 résolus par id canonique, 31 scannés sur leurs manifestes et lockfiles, " +
-  "25 interrogés contre OSV, 21 satisfont la couverture transitive complète. " +
+  "25 interrogés contre OSV, 21 satisfont la couverture transitive complète avec dénominateur réconcilié. " +
   "1 dépôt satisfait la chaîne entière : 181 dépendances externes résolues depuis uv.lock, " +
   "181 interrogées, 181 répondues, aucun finding statique, aucun avis OSV, " +
   "ancre registre concordante. Le mécanisme de requête est validé par témoin positif " +
   "(requests 2.19.0 → 10 avis). 452 entrées ne sont pas encore examinées. " +
-  "Le code source n'a pas été lu.";
+  "Le code source n'a pas été lu. Les dépôts polyglotes ne sont pas garantis sur l'union distincte de leurs écosystèmes sans lockfile.";
 
 export const OUT_OF_SCOPE = Object.freeze([
   'Exécution isolée du code : docker absent, aucun eBPF, aucun strace, aucun cold-start.',
   'Lecture du code source : seuls manifestes et lockfiles ont été lus.',
   'Analyse comportementale distincte : blockedFindingsOnly = 0 sur ce corpus.',
+  'Dépôts polyglotes : la porte de couverture agrège sans distinction par écosystème (et `osv_queries.lockfile_used` ne retient qu\'un seul lockfile primaire) ; un écosystème secondaire sans lockfile n\'est pas bloqué séparément.',
   'Chaîne de titre : la titularité des droits concédés n\'est pas attestée.',
   'Licéité de l\'acquisition initiale des données : non attestée.',
   'Brevets, contrôle export, marques : hors périmètre.',

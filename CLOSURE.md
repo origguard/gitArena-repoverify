@@ -2,7 +2,7 @@
 
 **Version :** final-1.0.0  
 **Ferme :** I10 · réconciliation du dénominateur  
-**Date :** 2026-11-18 03:38:00  
+**Date :** 2026-11-18 03:42:16  
 **Instrument :** FERMÉ — 30/30 contrôles, 8/8 fixtures
 
 ---
@@ -45,7 +45,7 @@ breakdown: findingsOnly=0 advisoriesOnly=13 both=7 verified=1  → somme 21 = pa
 
 ## 3 · Ce qui peut être publié, mot pour mot
 
-> Sur 485 entrées revendiquées, 33 ont été examinées. 2 fantômes confirmés (404), 31 résolus par id canonique, 31 scannés sur leurs manifestes et lockfiles, 25 interrogés contre OSV, 21 satisfont la couverture transitive complète. 1 dépôt satisfait la chaîne entière : 181 dépendances externes résolues depuis uv.lock, 181 interrogées, 181 répondues, aucun finding statique, aucun avis OSV, ancre registre concordante. Le mécanisme de requête est validé par témoin positif (requests 2.19.0 → 10 avis). 452 entrées ne sont pas encore examinées. Le code source n'a pas été lu.
+> Sur 485 entrées revendiquées, 33 ont été examinées. 2 fantômes confirmés (404), 31 résolus par id canonique, 31 scannés sur leurs manifestes et lockfiles, 25 interrogés contre OSV, 21 satisfont la couverture transitive complète avec dénominateur réconcilié. 1 dépôt satisfait la chaîne entière : 181 dépendances externes résolues depuis uv.lock, 181 interrogées, 181 répondues, aucun finding statique, aucun avis OSV, ancre registre concordante. Le mécanisme de requête est validé par témoin positif (requests 2.19.0 → 10 avis). 452 entrées ne sont pas encore examinées. Le code source n'a pas été lu. Les dépôts polyglotes ne sont pas garantis sur l'union distincte de leurs écosystèmes sans lockfile.
 
 ---
 
@@ -54,6 +54,7 @@ breakdown: findingsOnly=0 advisoriesOnly=13 both=7 verified=1  → somme 21 = pa
 - Exécution isolée du code : docker absent, aucun eBPF, aucun strace, aucun cold-start.
 - Lecture du code source : seuls manifestes et lockfiles ont été lus.
 - Analyse comportementale distincte : blockedFindingsOnly = 0 sur ce corpus.
+- Dépôts polyglotes : la porte de couverture agrège sans distinction par écosystème (et `osv_queries.lockfile_used` ne retient qu'un seul lockfile primaire) ; un écosystème secondaire sans lockfile n'est pas bloqué séparément.
 - Chaîne de titre : la titularité des droits concédés n'est pas attestée.
 - Licéité de l'acquisition initiale des données : non attestée.
 - Brevets, contrôle export, marques : hors périmètre.
@@ -129,6 +130,6 @@ F-07  PASS  bun.lockb · binaire → FORMAT_UNPARSEABLE, jamais zéro
 F-08  PASS  JSON corrompu → structure non reconnue, pas zéro
 ```
 
-**Empreinte de clôture :** `f0f204c4840b6764ed927e39eca41264371cfdc01b0d3d34cdf84e5ed68ff8a1`
+**Empreinte de clôture :** `fe2eccc05d34fb4693bd723739e72bdec08d60658a39598e2a24934aa3fd6207`
 
 *Généré localement. Aucune requête sortante. Le code source des dépôts indexés n'a pas été lu.*
