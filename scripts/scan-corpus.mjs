@@ -10,8 +10,10 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { initDatabase, closeDatabase } from '../src/db/database.mjs';
 import { scanBlobsBehavior } from '../src/engines/behavioral-firewall.mjs';
+import { assessRepo, visibleAdvisories } from '../src/engines/completeness.mjs';
+import { expectedUpstream, identityVerdict } from '../src/engines/identity-anchor.mjs';
 
-const SCANNER_VERSION = 'scanner_v0.6';
+const SCANNER_VERSION = 'scanner_v0.7';
 
 export const MANIFESTS = [
   'package.json', 'pyproject.toml', 'requirements.txt',
@@ -195,6 +197,87 @@ function parseManifestDeps(base, text) {
  * Priorité absolue aux lockfiles ; les manifestes ne servent qu'en repli par écosystème.
  */
 export function extractDeps(blobs = {}) {
+  return extractDepsWithCoverage(blobs).deps;
+}
+
+export function extractPrimaryPackage(blobs = {}) {
+  if (typeof blobs['package.json'] === 'string') {
+    try {
+      const pkg = JSON.parse(blobs['package.json']);
+      if (pkg?.name && typeof pkg.name === 'string') {
+        return { name: pkg.name.trim(), ecosystem: 'npm' };
+      }
+    } catch { /* ignore */ }
+  }
+  if (typeof blobs['pyproject.toml'] === 'string') {
+    const text = blobs['pyproject.toml'];
+    const projBlock = /\[(project|tool\.poetry)\]([\s\S]*?)(\n\[|$)/i.exec(text);
+    if (projBlock) {
+      const nm = /^\s*name\s*=\s*["']([^"']+)["']/m.exec(projBlock[2]);
+      if (nm) return { name: nm[1].trim(), ecosystem: 'PyPI' };
+    }
+  }
+  if (typeof blobs['Cargo.toml'] === 'string') {
+    const pkgBlock = /\[package\]([\s\S]*?)(\n\[|$)/i.exec(blobs['Cargo.toml']);
+    if (pkgBlock) {
+      const nm = /^\s*name\s*=\s*["']([^"']+)["']/m.exec(pkgBlock[1]);
+      if (nm) return { name: nm[1].trim(), ecosystem: 'crates.io' };
+    }
+  }
+  return null;
+}
+
+export function countDeclaredDeps(blobs = {}) {
+  let count = 0;
+  let sawManifest = false;
+
+  for (const [file, text] of Object.entries(blobs || {})) {
+    if (typeof text !== 'string') continue;
+    const base = file.split('/').pop();
+    if (base === 'package.json') {
+      sawManifest = true;
+      try {
+        const pkg = JSON.parse(text);
+        count += Object.keys(pkg.dependencies || {}).length + Object.keys(pkg.devDependencies || {}).length;
+      } catch { /* ignore */ }
+    } else if (base === 'requirements.txt') {
+      sawManifest = true;
+      for (const line of text.split(/\r?\n/)) {
+        const clean = line.replace(/#.*$/, '').trim();
+        if (clean && !clean.startsWith('-')) count++;
+      }
+    } else if (base === 'pyproject.toml') {
+      sawManifest = true;
+      const depsBlock = /dependencies\s*=\s*\[([\s\S]*?)\]/m.exec(text);
+      if (depsBlock) {
+        const items = depsBlock[1].match(/["'][^"']+["']/g);
+        if (items) count += items.length;
+      }
+    } else if (base === 'Cargo.toml') {
+      sawManifest = true;
+      let inDeps = false;
+      for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('[')) {
+          inDeps = /^\[(dependencies|dev-dependencies|build-dependencies|workspace\.dependencies)\]/i.test(trimmed);
+          continue;
+        }
+        if (inDeps && trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) count++;
+      }
+    } else if (base === 'go.mod') {
+      sawManifest = true;
+      for (const m of text.matchAll(/^\s*(?:require\s+)?([^\s/]+\/[^\s]+)\s+v\d+\.\d+\.\d+/gm)) {
+        if (m[1]) count++;
+      }
+    }
+  }
+  return sawManifest ? count : null;
+}
+
+/**
+ * Extrait les dépendances avec priorité lockfile ET calcule les métriques de couverture I6.
+ */
+export function extractDepsWithCoverage(blobs = {}) {
   const lockDepsByEco = new Map();
   const manifestDepsByEco = new Map();
 
@@ -215,10 +298,18 @@ export function extractDeps(blobs = {}) {
   }
 
   const combined = [];
+  let lockfileUsed = null;
+  let primaryEcosystem = null;
   const allEcos = new Set([...lockDepsByEco.keys(), ...manifestDepsByEco.keys()]);
   for (const eco of allEcos) {
     const lockList = lockDepsByEco.get(eco);
     const chosen = (lockList && lockList.length > 0) ? lockList : (manifestDepsByEco.get(eco) || []);
+    if (!lockfileUsed && lockList && lockList.length > 0) {
+      lockfileUsed = lockList[0].source || null;
+    }
+    if (!primaryEcosystem && chosen.length > 0) {
+      primaryEcosystem = eco;
+    }
     combined.push(...chosen);
   }
 
@@ -227,38 +318,101 @@ export function extractDeps(blobs = {}) {
     const k = `${d.ecosystem}:${d.name}:${d.version}`;
     if (!deduped.has(k)) deduped.set(k, d);
   }
-  return [...deduped.values()];
+  const deps = [...deduped.values()];
+  const depsDeclared = countDeclaredDeps(blobs);
+  const depsResolved = lockfileUsed ? deps.length : null;
+
+  return {
+    deps,
+    lockfileUsed,
+    primaryEcosystem: primaryEcosystem || (deps[0]?.ecosystem ?? null),
+    depsDeclared,
+    depsResolved,
+  };
+}
+
+function recordAttrition(db, { dryRun = false, cohortId = null, repoId = null, input, fromStage, toStage, reason, failures }) {
+  if (failures) {
+    failures.push({ repo: input, from_stage: fromStage, to_stage: toStage, reason });
+  }
+  if (!dryRun && db) {
+    db.prepare(`
+      INSERT INTO stage_attrition (cohort_id, repo_id, input, from_stage, to_stage, reason)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(cohortId || null, repoId || null, input, fromStage, toStage, reason);
+  }
+}
+
+function registerCohortMember(db, cohortId, repoId, input, dryRun = false) {
+  if (!cohortId || dryRun || !db || !input) return;
+  db.prepare(`
+    INSERT OR IGNORE INTO cohort_members (cohort_id, repo_id, input)
+    VALUES (?, ?, ?)
+  `).run(cohortId, repoId || null, input);
 }
 
 /**
- * Recensement honnête avec chaîne complète + unattempted explicite (Runbook III & revue)
+ * Recensement honnête avec chaîne complète + unattempted explicite + support de cohorte datée.
  */
-export function computeCensus(db) {
-  const row = db.prepare(`
-    SELECT
-      (SELECT COUNT(*) FROM repositories) AS indexed,
-      (SELECT COUNT(*) FROM corpus_inputs) AS inputs,
-      (SELECT COUNT(*) FROM corpus_inputs WHERE status != 'pending') AS attempted,
-      (SELECT COUNT(*) FROM corpus_inputs WHERE status = 'pending') AS unattempted,
-      (SELECT COUNT(*) FROM corpus_inputs WHERE status = 'ghost_404') AS ghosts,
-      (SELECT COUNT(*) FROM corpus_inputs WHERE status = 'duplicate') AS duplicates,
-      (SELECT COUNT(*) FROM repos) AS resolved,
-      (SELECT COUNT(DISTINCT owner || '/' || name) FROM behavioral_facts WHERE scan_mode = 'STATIC' AND COALESCE(scan_scope, '') != 'no_manifest_found') AS static_scanned,
-      (SELECT COUNT(DISTINCT owner || '/' || name) FROM osv_queries WHERE status = 'queried') AS osv_queried,
-      (SELECT COUNT(*) FROM (
-        SELECT b.owner, b.name
-        FROM behavioral_facts b
-        JOIN osv_queries o ON o.owner = b.owner AND o.name = b.name
-        WHERE b.scan_mode = 'STATIC'
-          AND COALESCE(b.scan_scope, '') != 'no_manifest_found'
-          AND o.status = 'queried'
-          AND json_array_length(b.findings_json) = 0
-          AND json_array_length(o.vulns_json) = 0
-        GROUP BY b.owner, b.name
-      )) AS verified_with_evidence
-  `).get();
+export function computeCensus(db, cohortId = null) {
+  const row = cohortId
+    ? db.prepare(`
+        SELECT
+          (SELECT COUNT(*) FROM repositories) AS indexed,
+          (SELECT COUNT(*) FROM cohort_members WHERE cohort_id = ?) AS inputs,
+          (SELECT COUNT(*) FROM cohort_members cm JOIN corpus_inputs ci ON (ci.resolved_id IS NOT NULL AND ci.resolved_id = cm.repo_id) OR LOWER(ci.input) = LOWER(cm.input) WHERE cm.cohort_id = ? AND ci.status != 'pending') AS attempted,
+          (SELECT COUNT(*) FROM cohort_members cm JOIN corpus_inputs ci ON (ci.resolved_id IS NOT NULL AND ci.resolved_id = cm.repo_id) OR LOWER(ci.input) = LOWER(cm.input) WHERE cm.cohort_id = ? AND ci.status = 'pending') AS unattempted,
+          (SELECT COUNT(*) FROM cohort_members cm JOIN corpus_inputs ci ON (ci.resolved_id IS NOT NULL AND ci.resolved_id = cm.repo_id) OR LOWER(ci.input) = LOWER(cm.input) WHERE cm.cohort_id = ? AND ci.status = 'ghost_404') AS ghosts,
+          (SELECT COUNT(*) FROM cohort_members cm JOIN corpus_inputs ci ON (ci.resolved_id IS NOT NULL AND ci.resolved_id = cm.repo_id) OR LOWER(ci.input) = LOWER(cm.input) WHERE cm.cohort_id = ? AND ci.status = 'duplicate') AS duplicates,
+          (SELECT COUNT(DISTINCT r.id) FROM cohort_members cm JOIN repos r ON r.id = cm.repo_id WHERE cm.cohort_id = ?) AS resolved,
+          (SELECT COUNT(DISTINCT r.full_name) FROM cohort_members cm JOIN repos r ON r.id = cm.repo_id JOIN behavioral_facts b ON b.owner = r.owner AND b.name = r.name WHERE cm.cohort_id = ? AND b.scan_mode = 'STATIC' AND COALESCE(b.scan_scope, '') != 'no_manifest_found') AS static_scanned,
+          (SELECT COUNT(DISTINCT r.full_name) FROM cohort_members cm JOIN repos r ON r.id = cm.repo_id JOIN osv_queries o ON o.owner = r.owner AND o.name = r.name WHERE cm.cohort_id = ? AND o.status = 'queried') AS osv_queried,
+          (SELECT COUNT(DISTINCT r.full_name) FROM cohort_members cm JOIN repos r ON r.id = cm.repo_id JOIN osv_queries o ON o.owner = r.owner AND o.name = r.name WHERE cm.cohort_id = ? AND o.status = 'queried' AND COALESCE(o.coverage_gate, '') = 'PASS') AS coverage_pass,
+          (SELECT COUNT(*) FROM (
+            SELECT b.owner, b.name
+            FROM cohort_members cm
+            JOIN repos r ON r.id = cm.repo_id
+            JOIN behavioral_facts b ON b.owner = r.owner AND b.name = r.name
+            JOIN osv_queries o ON o.owner = b.owner AND o.name = b.name
+            WHERE cm.cohort_id = ?
+              AND b.scan_mode = 'STATIC'
+              AND COALESCE(b.scan_scope, '') != 'no_manifest_found'
+              AND o.status = 'queried'
+              AND COALESCE(o.coverage_gate, '') = 'PASS'
+              AND json_array_length(b.findings_json) = 0
+              AND json_array_length(o.vulns_json) = 0
+            GROUP BY b.owner, b.name
+          )) AS verified_with_evidence,
+          (SELECT COUNT(*) FROM stage_attrition WHERE cohort_id = ?) AS attrition_events
+      `).get(cohortId, cohortId, cohortId, cohortId, cohortId, cohortId, cohortId, cohortId, cohortId, cohortId, cohortId)
+    : db.prepare(`
+        SELECT
+          (SELECT COUNT(*) FROM repositories) AS indexed,
+          (SELECT COUNT(*) FROM corpus_inputs) AS inputs,
+          (SELECT COUNT(*) FROM corpus_inputs WHERE status != 'pending') AS attempted,
+          (SELECT COUNT(*) FROM corpus_inputs WHERE status = 'pending') AS unattempted,
+          (SELECT COUNT(*) FROM corpus_inputs WHERE status = 'ghost_404') AS ghosts,
+          (SELECT COUNT(*) FROM corpus_inputs WHERE status = 'duplicate') AS duplicates,
+          (SELECT COUNT(*) FROM repos) AS resolved,
+          (SELECT COUNT(DISTINCT owner || '/' || name) FROM behavioral_facts WHERE scan_mode = 'STATIC' AND COALESCE(scan_scope, '') != 'no_manifest_found') AS static_scanned,
+          (SELECT COUNT(DISTINCT owner || '/' || name) FROM osv_queries WHERE status = 'queried') AS osv_queried,
+          (SELECT COUNT(DISTINCT owner || '/' || name) FROM osv_queries WHERE status = 'queried' AND COALESCE(coverage_gate, '') = 'PASS') AS coverage_pass,
+          (SELECT COUNT(*) FROM (
+            SELECT b.owner, b.name
+            FROM behavioral_facts b
+            JOIN osv_queries o ON o.owner = b.owner AND o.name = b.name
+            WHERE b.scan_mode = 'STATIC'
+              AND COALESCE(b.scan_scope, '') != 'no_manifest_found'
+              AND o.status = 'queried'
+              AND COALESCE(o.coverage_gate, '') = 'PASS'
+              AND json_array_length(b.findings_json) = 0
+              AND json_array_length(o.vulns_json) = 0
+            GROUP BY b.owner, b.name
+          )) AS verified_with_evidence,
+          (SELECT COUNT(*) FROM stage_attrition) AS attrition_events
+      `).get();
 
-  const inputs = row.inputs || row.indexed || 0;
+  const inputs = row.inputs || (cohortId ? 0 : row.indexed) || 0;
   const attempted = row.attempted || 0;
   const unattempted = row.inputs > 0 ? (row.unattempted || 0) : inputs;
   const ghosts = row.ghosts || 0;
@@ -266,9 +420,11 @@ export function computeCensus(db) {
   const resolved = row.resolved || 0;
   const staticScanned = row.static_scanned || 0;
   const osvQueried = row.osv_queried || 0;
+  const coveragePass = row.coverage_pass || 0;
   const verifiedWithEvidence = row.verified_with_evidence || 0;
 
   return {
+    cohortId: cohortId || null,
     inputs,
     indexed: row.indexed || 0,
     attempted,
@@ -278,8 +434,10 @@ export function computeCensus(db) {
     resolved,
     staticScanned,
     osvQueried,
+    coveragePass,
     verifiedWithEvidence,
-    chainSummary: `inputs=${inputs} attempted=${attempted} unattempted=${unattempted} ghosts=${ghosts} resolved=${resolved} static=${staticScanned} osv=${osvQueried} verified=${verifiedWithEvidence}`
+    attritionEvents: row.attrition_events || 0,
+    chainSummary: `inputs=${inputs} attempted=${attempted} unattempted=${unattempted} ghosts=${ghosts} resolved=${resolved} static=${staticScanned} osv=${osvQueried} pass=${coveragePass} verified=${verifiedWithEvidence}`
   };
 }
 
@@ -293,23 +451,21 @@ function seedCorpusInputsIfEmpty(db) {
   }
 }
 
-export function evaluateIdentity(input, apiData, canonical) {
+export function evaluateIdentity(input, apiData, canonical, upstreamAnchor = null) {
   const key = String(input || '').toLowerCase();
   const known = KNOWN_UPSTREAMS[key] || KNOWN_UPSTREAMS[String(canonical || '').toLowerCase()] || null;
   const resolvedId = Number(apiData.id);
   const isFork = Boolean(apiData.fork);
   const expectedUpstreamId = known ? known.expected_id : null;
-  let match = true;
-  let status = 'CANONICAL_MATCH';
+
+  let anchorVerdict = upstreamAnchor
+    ? identityVerdict(upstreamAnchor, { slug: canonical, inputSlug: input, id: resolvedId })
+    : { status: 'UNANCHORED', match: null, note: 'no_independent_upstream_anchor' };
 
   if (expectedUpstreamId && resolvedId !== expectedUpstreamId) {
-    match = false;
-    status = 'NAMESAKE_OR_FORK';
+    anchorVerdict = { status: 'NAMESAKE_OR_FORK', match: false, note: 'known_upstream_id_mismatch' };
   } else if (isFork) {
-    match = false;
-    status = 'FORK';
-  } else if (input.toLowerCase() !== String(canonical || '').toLowerCase()) {
-    status = 'REDIRECTED';
+    anchorVerdict = { status: 'FORK', match: false, note: 'github_repo_marked_fork' };
   }
 
   return {
@@ -319,12 +475,13 @@ export function evaluateIdentity(input, apiData, canonical) {
     fork: isFork,
     parent: apiData.parent?.full_name || null,
     expected_upstream_id: expectedUpstreamId,
-    match,
-    status
+    anchor: upstreamAnchor || null,
+    match: anchorVerdict.match,
+    status: anchorVerdict.status
   };
 }
 
-export async function resolveStage(db, { limit = 500, delayMs = 120, dryRun = false, force = false, headers, failures, apiCounter }) {
+export async function resolveStage(db, { limit = 500, delayMs = 120, dryRun = false, force = false, cohortId = null, headers, failures, apiCounter }) {
   seedCorpusInputsIfEmpty(db);
   const inputs = force
     ? db.prepare('SELECT input FROM corpus_inputs LIMIT ?').all(limit)
@@ -361,18 +518,19 @@ export async function resolveStage(db, { limit = 500, delayMs = 120, dryRun = fa
 
   for (const { input } of inputs) {
     const now = new Date().toISOString();
+    registerCohortMember(db, cohortId, null, input, dryRun);
     try {
       const r = await fetchGitHub(`https://api.github.com/repos/${input}`, headers, apiCounter);
       if (r.status === 404 || r.status === 451) {
         ghosts++;
         if (!dryRun) markInput.run('ghost_404', null, `http_${r.status}`, now, input);
-        failures.push({ repo: input, from_stage: 'corpus_inputs', to_stage: 'resolve', reason: `http_${r.status}` });
+        recordAttrition(db, { dryRun, cohortId, input, fromStage: 'corpus_inputs', toStage: 'resolve', reason: `http_${r.status}`, failures });
         await sleep(delayMs);
         continue;
       }
       if (!r.ok) {
         if (!dryRun) markInput.run('error', null, `http_${r.status}`, now, input);
-        failures.push({ repo: input, from_stage: 'corpus_inputs', to_stage: 'resolve', reason: `http_${r.status}` });
+        recordAttrition(db, { dryRun, cohortId, input, fromStage: 'corpus_inputs', toStage: 'resolve', reason: `http_${r.status}`, failures });
         await sleep(delayMs);
         continue;
       }
@@ -380,14 +538,14 @@ export async function resolveStage(db, { limit = 500, delayMs = 120, dryRun = fa
       if (!d.id) {
         ghosts++;
         if (!dryRun) markInput.run('ghost_404', null, 'missing_numeric_id', now, input);
-        failures.push({ repo: input, from_stage: 'corpus_inputs', to_stage: 'resolve', reason: 'missing_numeric_id' });
+        recordAttrition(db, { dryRun, cohortId, input, fromStage: 'corpus_inputs', toStage: 'resolve', reason: 'missing_numeric_id', failures });
         await sleep(delayMs);
         continue;
       }
       if (seen.has(d.id) || existingIds.has(d.id)) {
         dupes++;
         if (!dryRun) markInput.run('duplicate', d.id, `duplicate_of_${d.full_name}`, now, input);
-        failures.push({ repo: input, from_stage: 'corpus_inputs', to_stage: 'resolve', reason: `duplicate_id_${d.id}` });
+        recordAttrition(db, { dryRun, cohortId, repoId: d.id, input, fromStage: 'corpus_inputs', toStage: 'resolve', reason: `duplicate_id_${d.id}`, failures });
         await sleep(delayMs);
         continue;
       }
@@ -405,10 +563,13 @@ export async function resolveStage(db, { limit = 500, delayMs = 120, dryRun = fa
           d.pushed_at || null, JSON.stringify(identity), now
         );
         markInput.run('resolved', d.id, null, now, input);
+        if (cohortId) {
+          db.prepare('UPDATE cohort_members SET repo_id = ? WHERE cohort_id = ? AND input = ?').run(d.id, cohortId, input);
+        }
       }
     } catch (err) {
       if (!dryRun) markInput.run('error', null, err.message, now, input);
-      failures.push({ repo: input, from_stage: 'corpus_inputs', to_stage: 'resolve', reason: err.message });
+      recordAttrition(db, { dryRun, cohortId, input, fromStage: 'corpus_inputs', toStage: 'resolve', reason: err.message, failures });
     }
     await sleep(delayMs);
   }
@@ -532,7 +693,7 @@ async function scanBlobs(owner, name, branch, headers, apiCounter) {
   };
 }
 
-export async function scanStage(db, { limit = 500, fetchMode = 'raw', delayMs = 120, dryRun = false, force = false, headers, failures, apiCounter, blobCache }) {
+export async function scanStage(db, { limit = 500, fetchMode = 'raw', delayMs = 120, dryRun = false, force = false, cohortId = null, headers, failures, apiCounter, blobCache }) {
   const repos = force
     ? db.prepare('SELECT id, owner, name, full_name, default_branch FROM repos LIMIT ?').all(limit)
     : db.prepare(`
@@ -564,6 +725,7 @@ export async function scanStage(db, { limit = 500, fetchMode = 'raw', delayMs = 
   `);
 
   for (const r of repos) {
+    registerCohortMember(db, cohortId, r.id, r.full_name, dryRun);
     try {
       const branch = r.default_branch || 'main';
       let got = null;
@@ -572,13 +734,13 @@ export async function scanStage(db, { limit = 500, fetchMode = 'raw', delayMs = 
       else got = await scanBlobs(r.owner, r.name, branch, headers, apiCounter);
 
       if (!got || got.truncated) {
-        failures.push({ repo: r.full_name, from_stage: 'resolve', to_stage: 'scan', reason: 'tree_unusable_or_fetch_failed' });
+        recordAttrition(db, { dryRun, cohortId, repoId: r.id, input: r.full_name, fromStage: 'resolve', toStage: 'scan', reason: 'tree_unusable_or_fetch_failed', failures });
         await sleep(delayMs);
         continue;
       }
 
       if (got.scope === 'no_manifest_found') {
-        failures.push({ repo: r.full_name, from_stage: 'resolve', to_stage: 'scan', reason: 'no_manifest_found' });
+        recordAttrition(db, { dryRun, cohortId, repoId: r.id, input: r.full_name, fromStage: 'resolve', toStage: 'scan', reason: 'no_manifest_found', failures });
       }
 
       blobCache.set(r.full_name, got.blobs);
@@ -595,45 +757,81 @@ export async function scanStage(db, { limit = 500, fetchMode = 'raw', delayMs = 
       }
       if (got.scope !== 'no_manifest_found') scanned++;
     } catch (err) {
-      failures.push({ repo: r.full_name, from_stage: 'resolve', to_stage: 'scan', reason: err.message });
+      recordAttrition(db, { dryRun, cohortId, repoId: r.id, input: r.full_name, fromStage: 'resolve', toStage: 'scan', reason: err.message, failures });
     }
     await sleep(delayMs);
   }
 
   // Enregistrer explicitement toute attrition due au --limit restant
   const skippedByLimit = db.prepare(`
-    SELECT r.full_name FROM repos r
+    SELECT r.id, r.full_name FROM repos r
     WHERE NOT EXISTS (SELECT 1 FROM behavioral_facts b WHERE b.owner = r.owner AND b.name = r.name AND b.scan_mode = 'STATIC')
   `).all();
   for (const s of skippedByLimit) {
     if (!failures.some(f => f.repo === s.full_name && f.to_stage === 'scan')) {
-      failures.push({ repo: s.full_name, from_stage: 'resolve', to_stage: 'scan', reason: 'limit_cap_reached' });
+      recordAttrition(db, { dryRun, cohortId, repoId: s.id, input: s.full_name, fromStage: 'resolve', toStage: 'scan', reason: 'limit_cap_reached', failures });
     }
   }
 
   return { scanned };
 }
 
-export async function osvStage(db, { limit = 500, dryRun = false, force = false, failures, blobCache }) {
+async function anchorRepoIdentity(db, r, blobs, { dryRun = false, skipAnchor = false }) {
+  if (skipAnchor || !blobs) return null;
+  const primaryPkg = extractPrimaryPackage(blobs);
+  if (!primaryPkg) return null;
+
+  const repoRow = db.prepare('SELECT id, full_name, fork, identity_json FROM repos WHERE id = ?').get(r.id);
+  if (!repoRow) return null;
+  let current = {};
+  try { current = JSON.parse(repoRow.identity_json || '{}'); } catch { current = {}; }
+
+  const expected = await expectedUpstream(primaryPkg.name, primaryPkg.ecosystem);
+  const verdict = identityVerdict(expected, {
+    slug: repoRow.full_name,
+    inputSlug: current.input || repoRow.full_name,
+    id: repoRow.id,
+  });
+
+  const updated = {
+    ...current,
+    canonical: repoRow.full_name,
+    resolved_id: repoRow.id,
+    anchor: expected,
+    status: repoRow.fork ? 'FORK' : verdict.status,
+    match: repoRow.fork ? false : verdict.match,
+    anchored_at: new Date().toISOString(),
+  };
+
+  if (!dryRun) {
+    db.prepare('UPDATE repos SET identity_json = ? WHERE id = ?').run(JSON.stringify(updated), repoRow.id);
+  }
+  return updated;
+}
+
+export async function osvStage(db, { limit = 500, dryRun = false, force = false, cohortId = null, skipAnchor = false, failures, blobCache }) {
   const repos = force
-    ? db.prepare('SELECT owner, name, full_name FROM repos LIMIT ?').all(limit)
+    ? db.prepare('SELECT id, owner, name, full_name FROM repos LIMIT ?').all(limit)
     : db.prepare(`
-        SELECT r.owner, r.name, r.full_name
+        SELECT r.id, r.owner, r.name, r.full_name
         FROM repos r
         WHERE NOT EXISTS (
-          SELECT 1 FROM osv_queries o WHERE o.owner = r.owner AND o.name = r.name AND o.status = 'queried'
+          SELECT 1 FROM osv_queries o WHERE o.owner = r.owner AND o.name = r.name AND o.status = 'queried' AND o.coverage_gate IS NOT NULL
         )
         LIMIT ?
       `).all(limit);
   let osvOk = 0;
+  let coveragePass = 0;
 
   const insertOsv = db.prepare(`
     INSERT INTO osv_queries (
-      owner, name, full_name, ecosystem, packages, vulns_json, queried_at, ref, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      owner, name, full_name, ecosystem, packages, vulns_json, queried_at, ref, status,
+      deps_declared, deps_resolved, deps_queried, lockfile_used, coverage_gate
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   for (const r of repos) {
+    registerCohortMember(db, cohortId, r.id, r.full_name, dryRun);
     const fact = db.prepare(`
       SELECT id, scan_scope FROM behavioral_facts
       WHERE owner = ? AND name = ? AND scan_mode = 'STATIC'
@@ -641,32 +839,65 @@ export async function osvStage(db, { limit = 500, dryRun = false, force = false,
     `).get(r.owner, r.name);
 
     if (!fact || fact.scan_scope === 'no_manifest_found') {
-      failures.push({ repo: r.full_name, from_stage: 'scan', to_stage: 'osv', reason: fact ? 'no_manifest_found' : 'no_static_fact' });
+      recordAttrition(db, {
+        dryRun,
+        cohortId,
+        repoId: r.id,
+        input: r.full_name,
+        fromStage: 'scan',
+        toStage: 'osv',
+        reason: fact ? 'no_manifest_found' : 'no_static_fact',
+        failures
+      });
       continue;
     }
 
     let blobs = blobCache.get(r.full_name);
-    if (!blobs) {
-      const mRow = db.prepare('SELECT blobs_json FROM manifest_cache WHERE full_name = ?').get(r.full_name);
-      if (mRow) {
-        try { blobs = JSON.parse(mRow.blobs_json || '{}'); } catch { blobs = {}; }
-      }
+    let manifestProbe = null;
+    const mRow = db.prepare('SELECT blobs_json, manifest_probe_json FROM manifest_cache WHERE full_name = ?').get(r.full_name);
+    if (!blobs && mRow) {
+      try { blobs = JSON.parse(mRow.blobs_json || '{}'); } catch { blobs = {}; }
+    }
+    if (mRow?.manifest_probe_json) {
+      try { manifestProbe = JSON.parse(mRow.manifest_probe_json); } catch { manifestProbe = null; }
     }
 
-    const deps = extractDeps(blobs || {});
+    await anchorRepoIdentity(db, r, blobs || {}, { dryRun, skipAnchor });
+
+    const { deps, lockfileUsed, primaryEcosystem, depsDeclared, depsResolved } = extractDepsWithCoverage(blobs || {});
     const now = new Date().toISOString();
 
     if (deps.length === 0) {
+      const comp = assessRepo({
+        manifestProbe,
+        lockfileUsed,
+        depsDeclared,
+        depsResolved,
+        depsQueried: 0,
+      });
       if (!dryRun) {
         const ref = `osv:${r.full_name}:none:${Date.now()}:${fact.id}`;
-        insertOsv.run(r.owner, r.name, r.full_name, 'none', 0, '[]', now, ref, 'no_pinned_deps');
+        insertOsv.run(
+          r.owner, r.name, r.full_name, primaryEcosystem || 'none', 0, '[]', now, ref, 'no_pinned_deps',
+          depsDeclared, depsResolved, 0, lockfileUsed, comp.gate.gate
+        );
       }
-      failures.push({ repo: r.full_name, from_stage: 'scan', to_stage: 'osv', reason: 'no_pinned_deps' });
+      recordAttrition(db, {
+        dryRun,
+        cohortId,
+        repoId: r.id,
+        input: r.full_name,
+        fromStage: 'scan',
+        toStage: 'osv',
+        reason: 'no_pinned_deps',
+        failures
+      });
       continue;
     }
 
     try {
       const allVulns = [];
+      let queriedCount = 0;
       let anyQueried = false;
       for (let off = 0; off < deps.length; off += 60) {
         const chunk = deps.slice(off, off + 60);
@@ -693,14 +924,28 @@ export async function osvStage(db, { limit = 500, dryRun = false, force = false,
         }
         if (!res) throw lastErr || new Error('osv_network_failed');
         if (!res.ok) {
-          failures.push({ repo: r.full_name, from_stage: 'scan', to_stage: 'osv', reason: `osv_http_${res.status}` });
+          recordAttrition(db, {
+            dryRun,
+            cohortId,
+            repoId: r.id,
+            input: r.full_name,
+            fromStage: 'scan',
+            toStage: 'osv',
+            reason: `osv_http_${res.status}`,
+            failures
+          });
           if (!dryRun) {
-            insertOsv.run(r.owner, r.name, r.full_name, deps[0].ecosystem, deps.length, '[]', now, `osv:${r.full_name}:err:${Date.now()}:${fact.id}`, 'error');
+            insertOsv.run(
+              r.owner, r.name, r.full_name, deps[0].ecosystem, deps.length, '[]', now,
+              `osv:${r.full_name}:err:${Date.now()}:${fact.id}`, 'error',
+              depsDeclared, depsResolved, queriedCount, lockfileUsed, 'INCOMPLETE_QUERY'
+            );
           }
           anyQueried = false;
           break;
         }
         anyQueried = true;
+        queriedCount += chunk.length;
         const j = await res.json();
         for (let i = 0; i < (j.results || []).length; i++) {
           const item = j.results[i];
@@ -713,19 +958,53 @@ export async function osvStage(db, { limit = 500, dryRun = false, force = false,
       }
 
       if (anyQueried) {
+        const filteredVulns = visibleAdvisories(allVulns, deps.map(d => d.name));
+        const comp = assessRepo({
+          manifestProbe,
+          lockfileUsed,
+          depsDeclared,
+          depsResolved,
+          depsQueried: queriedCount,
+        });
         if (!dryRun) {
           const ref = `osv:${r.full_name}:${fact.id}:${Date.now()}`;
-          insertOsv.run(r.owner, r.name, r.full_name, deps[0].ecosystem, deps.length, JSON.stringify(allVulns), now, ref, 'queried');
+          insertOsv.run(
+            r.owner, r.name, r.full_name, deps[0].ecosystem, deps.length, JSON.stringify(filteredVulns), now, ref, 'queried',
+            comp.coverage.deps_declared, comp.coverage.deps_resolved, comp.coverage.deps_queried,
+            comp.coverage.lockfile, comp.gate.gate
+          );
         }
         osvOk++;
+        if (comp.gate.gate === 'PASS') coveragePass++;
+        else {
+          recordAttrition(db, {
+            dryRun,
+            cohortId,
+            repoId: r.id,
+            input: r.full_name,
+            fromStage: 'osv',
+            toStage: 'verified',
+            reason: `coverage_gate_${comp.gate.gate}`,
+            failures
+          });
+        }
         await sleep(60);
       }
     } catch (err) {
-      failures.push({ repo: r.full_name, from_stage: 'scan', to_stage: 'osv', reason: err.message });
+      recordAttrition(db, {
+        dryRun,
+        cohortId,
+        repoId: r.id,
+        input: r.full_name,
+        fromStage: 'scan',
+        toStage: 'osv',
+        reason: err.message,
+        failures
+      });
     }
   }
 
-  return { osv_ok: osvOk };
+  return { osv_ok: osvOk, coverage_pass: coveragePass };
 }
 
 if (process.argv[1] && process.argv[1].endsWith('scan-corpus.mjs')) {
@@ -734,14 +1013,16 @@ if (process.argv[1] && process.argv[1].endsWith('scan-corpus.mjs')) {
   const LIMIT = Number(arg('limit') || 500);
   const FETCH = arg('fetch') || 'raw';
   const DELAY = Number(arg('delay') || 120);
+  const COHORT = arg('cohort') || null;
   const DRY = process.argv.includes('--dry-run');
   const FORCE = process.argv.includes('--force');
+  const SKIP_ANCHOR = process.argv.includes('--skip-anchor');
   const ONLY_CENSUS = process.argv.includes('--census');
 
   const db = initDatabase();
 
   if (ONLY_CENSUS) {
-    console.log(JSON.stringify(computeCensus(db), null, 2));
+    console.log(JSON.stringify(computeCensus(db, COHORT), null, 2));
     closeDatabase();
     process.exit(0);
   }
@@ -762,18 +1043,18 @@ if (process.argv[1] && process.argv[1].endsWith('scan-corpus.mjs')) {
   const started = new Date().toISOString();
 
   const runId = DRY ? null : Number(
-    db.prepare('INSERT INTO scan_runs (started_at, stage, fetch_mode) VALUES (?, ?, ?)').run(started, STAGE, FETCH).lastInsertRowid
+    db.prepare('INSERT INTO scan_runs (started_at, stage, fetch_mode, cohort_id) VALUES (?, ?, ?, ?)').run(started, STAGE, FETCH, COHORT).lastInsertRowid
   );
 
   const out = {};
   if (STAGE === 'all' || STAGE === 'resolve') {
-    Object.assign(out, await resolveStage(db, { limit: LIMIT, delayMs: DELAY, dryRun: DRY, force: FORCE, headers, failures, apiCounter }));
+    Object.assign(out, await resolveStage(db, { limit: LIMIT, delayMs: DELAY, dryRun: DRY, force: FORCE, cohortId: COHORT, headers, failures, apiCounter }));
   }
   if (STAGE === 'all' || STAGE === 'scan') {
-    Object.assign(out, await scanStage(db, { limit: LIMIT, fetchMode: FETCH, delayMs: DELAY, dryRun: DRY, force: FORCE, headers, failures, apiCounter, blobCache }));
+    Object.assign(out, await scanStage(db, { limit: LIMIT, fetchMode: FETCH, delayMs: DELAY, dryRun: DRY, force: FORCE, cohortId: COHORT, headers, failures, apiCounter, blobCache }));
   }
   if (STAGE === 'all' || STAGE === 'osv') {
-    Object.assign(out, await osvStage(db, { limit: LIMIT, dryRun: DRY, force: FORCE, failures, blobCache }));
+    Object.assign(out, await osvStage(db, { limit: LIMIT, dryRun: DRY, force: FORCE, cohortId: COHORT, skipAnchor: SKIP_ANCHOR, failures, blobCache }));
   }
 
   if (runId) {
@@ -794,10 +1075,11 @@ if (process.argv[1] && process.argv[1].endsWith('scan-corpus.mjs')) {
     );
   }
 
-  const census = computeCensus(db);
+  const census = computeCensus(db, COHORT);
   console.log(JSON.stringify({
     stage: STAGE,
     fetch: FETCH,
+    cohort: COHORT,
     dry: DRY,
     apiCalls: apiCounter.calls,
     ...out,

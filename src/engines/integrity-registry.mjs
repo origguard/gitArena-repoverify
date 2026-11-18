@@ -17,6 +17,7 @@ import {
   evaluatePolicyAction
 } from './evidence.mjs';
 import { revokeKeyId, isKeyRevoked } from './revocation.mjs';
+import { assessCoverage, gateCompleteness, applyCap } from './completeness.mjs';
 
 /**
  * Registre de Signatures d'Intégrité Ed25519 — Pilier 2 (RepoVerify / GitArena)
@@ -180,7 +181,7 @@ function getCachedOsvSummary(fullName) {
   try {
     const db = getDb();
     const osvRow = db.prepare(`
-      SELECT ref, vulns_json, status
+      SELECT ref, vulns_json, status, deps_declared, deps_resolved, deps_queried, lockfile_used, coverage_gate
       FROM osv_queries
       WHERE full_name = ? AND status = 'queried'
       ORDER BY queried_at DESC, id DESC
@@ -189,11 +190,25 @@ function getCachedOsvSummary(fullName) {
 
     if (osvRow) {
       const vulns = JSON.parse(osvRow.vulns_json || '[]');
+      const cov = assessCoverage({
+        lockfile: osvRow.lockfile_used || null,
+        deps_declared: osvRow.deps_declared,
+        deps_resolved: osvRow.deps_resolved,
+        deps_queried: osvRow.deps_queried ?? 0,
+        transitive: Boolean(osvRow.lockfile_used),
+      });
+      const gateRes = osvRow.coverage_gate
+        ? { gate: osvRow.coverage_gate, cap: osvRow.coverage_gate === 'PASS' ? 'ALLOW' : (osvRow.coverage_gate === 'DIRECT_ONLY' ? 'WARN' : 'INDETERMINATE') }
+        : gateCompleteness(cov);
       return {
         scanned: true,
         totalVulnerabilities: vulns.length,
         maxSeverity: vulns.length > 0 ? 'HIGH' : 'NONE',
-        ref: osvRow.ref
+        ref: osvRow.ref,
+        coverage: cov,
+        coverageGate: gateRes.gate,
+        coverageCap: gateRes.cap,
+        lockfileUsed: osvRow.lockfile_used || null,
       };
     }
 
@@ -300,6 +315,20 @@ export function evaluateGatekeeperPolicy(inspectPayload, behaviorFacts, osvSumma
     decision = Verdict.ALLOW;
   }
 
+  // I6 : Plafonnement strict par la complétude OSV (lockfile + >= 98 % des dépendances interrogées)
+  if (osvSummary?.scanned) {
+    const cap = osvSummary.coverageCap || (osvSummary.coverageGate === 'PASS' ? 'ALLOW' : 'INDETERMINATE');
+    const cappedDecision = applyCap(decision, cap);
+    if (cappedDecision !== decision) {
+      warnings.push({
+        gate: 'COMPLETENESS_GATE',
+        severity: 'WARN',
+        message: `Verdict plafonné de ${decision} à ${cappedDecision} par I6 (${osvSummary.coverageGate || 'NO_LOCKFILE'}).`
+      });
+      decision = cappedDecision;
+    }
+  }
+
   const policyAction = evaluatePolicyAction({ verdict: decision }, policyProfile);
 
   return {
@@ -322,7 +351,9 @@ export function evaluateGatekeeperPolicy(inspectPayload, behaviorFacts, osvSumma
       busFactorRisk: health.maintainerHealth?.busFactorRisk || 'UNKNOWN',
       scanMode: behaviorFacts?.scanMode || null,
       osvScanned: Boolean(osvSummary?.scanned),
-      osvMaxSeverity: osvSummary?.maxSeverity || 'NONE'
+      osvMaxSeverity: osvSummary?.maxSeverity || 'NONE',
+      coverageGate: osvSummary?.coverageGate || (osvSummary?.scanned ? 'NO_LOCKFILE' : null),
+      lockfileUsed: osvSummary?.lockfileUsed || null
     }
   };
 }
@@ -538,6 +569,7 @@ export function getHonestCensus() {
           WHERE b.scan_mode = 'STATIC'
             AND COALESCE(b.scan_scope, '') != 'no_manifest_found'
             AND o.status = 'queried'
+            AND COALESCE(o.coverage_gate, '') = 'PASS'
             AND json_array_length(b.findings_json) = 0
             AND json_array_length(o.vulns_json) = 0
           GROUP BY b.owner, b.name

@@ -297,7 +297,12 @@ CREATE TABLE IF NOT EXISTS osv_queries (
     vulns_json TEXT NOT NULL DEFAULT '[]',
     queried_at TEXT NOT NULL,
     ref TEXT NOT NULL UNIQUE,
-    status TEXT NOT NULL CHECK (status IN ('queried', 'no_pinned_deps', 'error'))
+    status TEXT NOT NULL CHECK (status IN ('queried', 'no_pinned_deps', 'error')),
+    deps_declared INTEGER,
+    deps_resolved INTEGER,
+    deps_queried INTEGER,
+    lockfile_used TEXT,
+    coverage_gate TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_osv_queries_repo ON osv_queries(owner, name, queried_at DESC);
@@ -309,6 +314,7 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     finished_at TEXT,
     stage TEXT NOT NULL,
     fetch_mode TEXT,
+    cohort_id TEXT,
     resolved INTEGER DEFAULT 0,
     ghosts INTEGER DEFAULT 0,
     dupes INTEGER DEFAULT 0,
@@ -317,3 +323,28 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     api_calls INTEGER DEFAULT 0,
     failures TEXT DEFAULT '[]'
 );
+
+-- 20. Phase IV (§21) : Cohortes datées (un dénominateur figé par échantillon)
+CREATE TABLE IF NOT EXISTS cohort_members (
+    cohort_id TEXT NOT NULL,
+    repo_id INTEGER,
+    input TEXT NOT NULL,
+    added_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (cohort_id, input)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cohort_members_cohort ON cohort_members(cohort_id);
+
+-- 21. Phase IV (§18) : Attrition nommée entre étages (zéro perte silencieuse)
+CREATE TABLE IF NOT EXISTS stage_attrition (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cohort_id TEXT,
+    repo_id INTEGER,
+    input TEXT NOT NULL,
+    from_stage TEXT NOT NULL,
+    to_stage TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_stage_attrition_cohort ON stage_attrition(cohort_id, from_stage, to_stage);

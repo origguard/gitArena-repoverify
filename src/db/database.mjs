@@ -89,6 +89,28 @@ export function initDatabase(dbPath = null) {
     db.exec('ALTER TABLE manifest_cache ADD COLUMN manifest_probe_json TEXT;');
   }
 
+  const osvCols = db.prepare('PRAGMA table_info(osv_queries)').all().map(c => c.name);
+  if (!osvCols.includes('deps_declared')) {
+    db.exec('ALTER TABLE osv_queries ADD COLUMN deps_declared INTEGER;');
+  }
+  if (!osvCols.includes('deps_resolved')) {
+    db.exec('ALTER TABLE osv_queries ADD COLUMN deps_resolved INTEGER;');
+  }
+  if (!osvCols.includes('deps_queried')) {
+    db.exec('ALTER TABLE osv_queries ADD COLUMN deps_queried INTEGER;');
+  }
+  if (!osvCols.includes('lockfile_used')) {
+    db.exec('ALTER TABLE osv_queries ADD COLUMN lockfile_used TEXT;');
+  }
+  if (!osvCols.includes('coverage_gate')) {
+    db.exec('ALTER TABLE osv_queries ADD COLUMN coverage_gate TEXT;');
+  }
+
+  const runCols = db.prepare('PRAGMA table_info(scan_runs)').all().map(c => c.name);
+  if (!runCols.includes('cohort_id')) {
+    db.exec('ALTER TABLE scan_runs ADD COLUMN cohort_id TEXT;');
+  }
+
   // Réconciliation initiale si repos existaient déjà avant ajout de status sur corpus_inputs
   db.exec(`
     UPDATE corpus_inputs

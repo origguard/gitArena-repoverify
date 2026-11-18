@@ -29,6 +29,8 @@ import { dedupe } from '../src/engines/corpus-audit.mjs';
 import { executionVerdict } from '../src/engines/recipes.mjs';
 import { evaluateGolden } from './golden-eval.mjs';
 import { extractDeps, computeCensus, evaluateIdentity } from '../scripts/scan-corpus.mjs';
+import { assessCoverage, gateCompleteness, applyCap, visibleAdvisories, assessRepo } from '../src/engines/completeness.mjs';
+import { cleanGitUrl, expectedUpstream, identityVerdict } from '../src/engines/identity-anchor.mjs';
 import { runPrGuard } from '../src/engines/pr-guard.mjs';
 import { issueOrgLicense, verifyOrgLicense } from '../src/engines/license-tier.mjs';
 import { createGitArenaServer } from '../src/server/server.mjs';
@@ -44,7 +46,7 @@ async function runE2eHarness() {
   console.log('======================================================\n');
 
   let passedTests = 0;
-  const totalTests = 27;
+  const totalTests = 28;
 
   // TEST-01 : Schéma & Persistance SQLite WAL
   console.log('[TEST-01] Vérification du Schéma & Mode WAL SQLite...');
@@ -59,11 +61,12 @@ async function runE2eHarness() {
     'maintainer_health_cache', 'arena_tournaments',
     'behavioral_audits', 'behavioral_facts', 'integrity_signatures', 'revoked_keys',
     'execution_benchmarks', 'org_policies',
-    'corpus_inputs', 'repos', 'manifest_cache', 'osv_queries', 'scan_runs'
+    'corpus_inputs', 'repos', 'manifest_cache', 'osv_queries', 'scan_runs',
+    'cohort_members', 'stage_attrition'
   ]) {
     assert.ok(tables.includes(requiredTable), `Table ${requiredTable} absente`);
   }
-  console.log('  ✓ TEST-01 Validé : SQLite WAL et 21 tables opérationnels.');
+  console.log('  ✓ TEST-01 Validé : SQLite WAL et 23 tables opérationnels.');
   passedTests++;
 
   // TEST-02 : Ingestion & Seeding Réel
@@ -547,6 +550,8 @@ async function runE2eHarness() {
     'src/db/seeder.mjs',
     'src/db/bulk-ingestor.mjs',
     'src/engines/evidence.mjs',
+    'src/engines/completeness.mjs',
+    'src/engines/identity-anchor.mjs',
     'src/engines/ai-scoring-engine.mjs',
     'src/engines/elo-engine.mjs',
     'src/engines/harness-runner.mjs',
@@ -779,7 +784,7 @@ async function runE2eHarness() {
     idxDb.prepare('INSERT INTO repos (id, owner, name, full_name, resolved_at) VALUES (?, ?, ?, ?, ?)').run(11, 'nopins', 'pkg', 'nopins/pkg', '2026-11-17');
     idxDb.prepare("INSERT INTO behavioral_facts (owner, name, full_name, scan_mode, scan_scope, ref, findings_json, scanned_at, scanner_version) VALUES ('clean','pkg','clean/pkg','STATIC','raw_manifests','behavioral_facts:1','[]','2026-11-17','v0.6')").run();
     idxDb.prepare("INSERT INTO behavioral_facts (owner, name, full_name, scan_mode, scan_scope, ref, findings_json, scanned_at, scanner_version) VALUES ('nopins','pkg','nopins/pkg','STATIC','no_manifest_found','behavioral_facts:2','[]','2026-11-17','v0.6')").run();
-    idxDb.prepare("INSERT INTO osv_queries (owner, name, full_name, ecosystem, packages, vulns_json, queried_at, ref, status) VALUES ('clean','pkg','clean/pkg','npm',1,'[]','2026-11-17','osv:clean/pkg:1','queried')").run();
+    idxDb.prepare("INSERT INTO osv_queries (owner, name, full_name, ecosystem, packages, vulns_json, queried_at, ref, status, deps_declared, deps_resolved, deps_queried, lockfile_used, coverage_gate) VALUES ('clean','pkg','clean/pkg','npm',1,'[]','2026-11-17','osv:clean/pkg:1','queried',1,1,1,'package-lock.json','PASS')").run();
     idxDb.prepare("INSERT INTO osv_queries (owner, name, full_name, ecosystem, packages, vulns_json, queried_at, ref, status) VALUES ('nopins','pkg','nopins/pkg','none',0,'[]','2026-11-17','osv:nopins/pkg:none','no_pinned_deps')").run();
 
     const p3Census = computeCensus(idxDb);
@@ -796,6 +801,77 @@ async function runE2eHarness() {
     rmSync(tmpIdxDir, { recursive: true, force: true });
   }
   console.log('  ✓ TEST-27 Validé : Lockfiles, Semver x.y.z, Identité, unattempted & Census conformes.');
+  passedTests++;
+
+  // TEST-28 : Phase IV (I6 Complétude, Visibilité OSV, Ancre Registres Indépendants & Cohortes)
+  console.log('[TEST-28] Vérification Phase IV (I6 Complétude, Identité Registre & Cohortes)...');
+  const covNoLock = assessCoverage({ lockfile: null, deps_declared: 5, deps_resolved: null, deps_queried: 5, transitive: false });
+  assert.equal(gateCompleteness(covNoLock).gate, 'NO_LOCKFILE');
+  assert.equal(gateCompleteness(covNoLock).cap, 'INDETERMINATE');
+  assert.equal(applyCap('ALLOW', gateCompleteness(covNoLock).cap), 'INDETERMINATE');
+
+  const covPartial = assessCoverage({ lockfile: 'Cargo.lock', deps_declared: 10, deps_resolved: 1010, deps_queried: 10, transitive: true });
+  assert.equal(gateCompleteness(covPartial).gate, 'INCOMPLETE_QUERY');
+  assert.equal(gateCompleteness(covPartial).cap, 'INDETERMINATE');
+
+  const covPass = assessRepo({ lockfileUsed: 'uv.lock', depsDeclared: 14, depsResolved: 168, depsQueried: 168 });
+  assert.equal(covPass.gate.gate, 'PASS');
+  assert.equal(covPass.gate.cap, 'ALLOW');
+  assert.equal(applyCap('ALLOW', covPass.gate.cap), 'ALLOW');
+
+  const vis = visibleAdvisories(
+    [{ id: 'RUSTSEC-1', package: 'bincode' }, { id: 'GHSA-2', package: 'pillow' }, { id: 'GHSA-3', package: 'serde' }],
+    ['Serde', 'tokio']
+  );
+  assert.deepEqual(vis.map(v => v.id), ['GHSA-3']);
+
+  assert.equal(cleanGitUrl('git+https://github.com/Codium-ai/pr-agent.git'), 'codium-ai/pr-agent');
+  assert.equal(identityVerdict({ url: null, reason: 'registry_http_404' }, { slug: 'a/b', id: 1 }).status, 'UNANCHORED');
+  assert.equal(identityVerdict({ url: 'https://github.com/Codium-ai/pr-agent', source: 'pypi.org' }, { slug: 'The-PR-Agent/pr-agent', inputSlug: 'Codium-ai/pr-agent', id: 662766482 }).status, 'REDIRECTED');
+  // Fixture délibérée de homonyme / usurpation (NAMESAKE_OR_FORK)
+  const namesakeRes = identityVerdict(
+    { source: 'pypi.org', url: 'https://github.com/orig-org/authentic-tool' },
+    { slug: 'lookalike-actor/authentic-tool', id: 9876543 }
+  );
+  assert.equal(namesakeRes.status, 'NAMESAKE_OR_FORK');
+  assert.equal(namesakeRes.match, false);
+
+  const mockPyPI = await expectedUpstream('demo-pkg', 'PyPI', {
+    fetchFn: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ info: { project_urls: { Source: 'https://github.com/real-org/demo-pkg' } } })
+    })
+  });
+  assert.equal(mockPyPI.slug, 'real-org/demo-pkg');
+  assert.equal(mockPyPI.source, 'pypi.org');
+
+  const tmpP4Dir = mkdtempSync(join(tmpdir(), 'repoverify-p4-'));
+  try {
+    const p4Db = new DatabaseSync(join(tmpP4Dir, 'p4.sqlite'));
+    p4Db.exec(readFileSync(join(__dirname, '../src/db/schema.sql'), 'utf8'));
+    p4Db.prepare("INSERT INTO corpus_inputs (input, status, added_at) VALUES ('nolock/pkg', 'resolved', '2026-11-18')").run();
+    p4Db.prepare("INSERT INTO corpus_inputs (input, status, added_at) VALUES ('locked/pkg', 'resolved', '2026-11-18')").run();
+    p4Db.prepare('INSERT INTO repos (id, owner, name, full_name, resolved_at) VALUES (?, ?, ?, ?, ?)').run(20, 'nolock', 'pkg', 'nolock/pkg', '2026-11-18');
+    p4Db.prepare('INSERT INTO repos (id, owner, name, full_name, resolved_at) VALUES (?, ?, ?, ?, ?)').run(21, 'locked', 'pkg', 'locked/pkg', '2026-11-18');
+    p4Db.prepare("INSERT INTO behavioral_facts (owner, name, full_name, scan_mode, scan_scope, ref, findings_json, scanned_at, scanner_version) VALUES ('nolock','pkg','nolock/pkg','STATIC','raw_manifests','behavioral_facts:20','[]','2026-11-18','v0.7')").run();
+    p4Db.prepare("INSERT INTO behavioral_facts (owner, name, full_name, scan_mode, scan_scope, ref, findings_json, scanned_at, scanner_version) VALUES ('locked','pkg','locked/pkg','STATIC','raw_manifests','behavioral_facts:21','[]','2026-11-18','v0.7')").run();
+    p4Db.prepare("INSERT INTO osv_queries (owner, name, full_name, ecosystem, packages, vulns_json, queried_at, ref, status, deps_declared, deps_resolved, deps_queried, lockfile_used, coverage_gate) VALUES ('nolock','pkg','nolock/pkg','npm',5,'[]','2026-11-18','osv:nolock/pkg:1','queried',5,NULL,5,NULL,'NO_LOCKFILE')").run();
+    p4Db.prepare("INSERT INTO osv_queries (owner, name, full_name, ecosystem, packages, vulns_json, queried_at, ref, status, deps_declared, deps_resolved, deps_queried, lockfile_used, coverage_gate) VALUES ('locked','pkg','locked/pkg','PyPI',168,'[]','2026-11-18','osv:locked/pkg:1','queried',14,168,168,'uv.lock','PASS')").run();
+    p4Db.prepare("INSERT INTO cohort_members (cohort_id, repo_id, input) VALUES ('cohort-test', 20, 'nolock/pkg'), ('cohort-test', 21, 'locked/pkg')").run();
+    p4Db.prepare("INSERT INTO stage_attrition (cohort_id, repo_id, input, from_stage, to_stage, reason) VALUES ('cohort-test', 20, 'nolock/pkg', 'osv', 'verified', 'coverage_gate_NO_LOCKFILE')").run();
+
+    const cohortCensus = computeCensus(p4Db, 'cohort-test');
+    assert.equal(cohortCensus.inputs, 2);
+    assert.equal(cohortCensus.osvQueried, 2);
+    assert.equal(cohortCensus.coveragePass, 1);
+    assert.equal(cohortCensus.verifiedWithEvidence, 1, 'NO_LOCKFILE ne doit pas être compté comme vérifié sous I6');
+    assert.equal(cohortCensus.attritionEvents, 1);
+    p4Db.close();
+  } finally {
+    rmSync(tmpP4Dir, { recursive: true, force: true });
+  }
+  console.log('  ✓ TEST-28 Validé : I6 complétude, visibilité OSV, ancre registres, homonymes & cohortes conformes.');
   passedTests++;
 
   console.log('\n======================================================');
